@@ -1,0 +1,65 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+      "environmentName": {
+        "value": "${AZURE_ENV_NAME}"
+      },
+      "location": {
+        "value": "${AZURE_LOCATION}"
+      },
+      "gbbAiAudioAgentExists": {
+        "value": "${SERVICE_GBB_AI_AUDIO_AGENT_RESOURCE_EXISTS=false}"
+      },
+      "gbbAiAudioAgentBackendExists": {
+        "value": "${SERVICE_GBB_AI_AUDIO_AGENT_BACKEND_RESOURCE_EXISTS=false}"
+      },
+      "enableEasyAuth": {
+        "value": "${ENABLE_EASY_AUTH=false}"
+      },
+      "enableAppGateway": {
+        "value": "${ENABLE_APP_GATEWAY=false}"
+      },
+      "principalId": {
+        "value": "${AZURE_PRINCIPAL_ID}"
+      },
+      "azureOpenAIBackendConfig": {
+        "value": [
+          {
+            "name": "openai-primary-${AZURE_LOCATION}-backend",
+            "location": "${AZURE_LOCATION}",
+            "priority": 1,
+            "chat": {
+              "sku": "GlobalStandard",
+              "capacity": 50,
+              "name": "gpt-4o",
+              "version": "2024-11-20"
+            }
+          },
+          {
+            "name": "openai-secondary-westus-backend",
+            "location": "westus",
+            "priority": 2,
+            "chat": {
+              "sku": "Standard",
+              "capacity": 25,
+              "name": "gpt-4o",
+              "version": "2024-11-20"
+            }
+          },
+          {
+            "name": "openai-secondary-westus3-backend",
+            "location": "westus3",
+            "priority": 2,
+            "chat": {
+              "sku": "Standard",
+              "capacity": 25,
+              "name": "gpt-4o",
+              "version": "2024-11-20"
+            }
+          }
+        ]
+      }
+
+    }
+}

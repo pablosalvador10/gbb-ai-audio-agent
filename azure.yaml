@@ -1,0 +1,22 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+name: gbb-ai-audio-agent
+metadata:
+  template: azd-init@1.15.1
+services:
+  gbb-ai-audio-agent:
+    project: usecases/browser_RTMedAgent/frontend
+    host: containerapp
+    language: js
+    docker:
+      path: ./Dockerfile
+      context: .
+      platform: linux/amd64
+      
+  gbb-ai-audio-agent-backend:
+    project: usecases/browser_RTMedAgent/backend
+    host: containerapp
+    language: python
+    docker:
+      path: ./Dockerfile
+      context: ../../../
+      platform: linux/amd64

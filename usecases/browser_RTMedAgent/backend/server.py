@@ -912,17 +912,88 @@ async def websocket_endpoint(websocket: WebSocket) -> None:  # noqa: D401
 
 
 # --------------------------------------------------------------------------- #
-#  Health probe
+#  Health, Liveness, and Readiness Probes
 # --------------------------------------------------------------------------- #
-@app.get("/health")
-async def read_health() -> Dict[str, str]:
-    """Kubernetes-friendly liveness endpoint."""
-    return {"message": "Server is running!"}
+@app.get("/healthz")
+async def liveness():
+    """Liveness probe: checks if the event loop is responsive."""
+    try:
+        await asyncio.sleep(0)
+        return {"status": "alive"}
+    except Exception:
+        raise HTTPException(status_code=500, detail="App loop unresponsive")
 
+@app.get("/readyz")
+async def readiness():
+    """
+    Readiness probe for Azure Container Apps.
+    Returns 200 if all critical components are ready, else 503.
+    """
+    components = {
+        "acs_caller": getattr(app.state, "acs_caller", None) is not None,
+        "tts_client": getattr(app.state, "tts_client", None) is not None,
+        "stt_client": getattr(app.state, "stt_client", None) is not None,
+    }
+    if all(components.values()):
+        return {
+            "ready": True,
+            "message": "All critical components are ready.",
+            "components": components,
+        }
+    return JSONResponse(
+        status_code=503,
+        content={
+            "ready": False,
+            "unavailable": [k for k, v in components.items() if not v],
+        },
+    )
+
+@app.get("/startup")
+async def startup_probe():
+    """
+    Startup probe: checks if TTS and STT clients are loaded.
+    Returns 200 if ready, else 503.
+    """
+    if getattr(app.state, "tts_client", None) is None:
+        raise HTTPException(status_code=503, detail="TTS not loaded")
+    if getattr(app.state, "stt_client", None) is None:
+        raise HTTPException(status_code=503, detail="STT not loaded")
+    return {"started": True}
+
+@app.websocket("/loadtest")
+async def loadtest_websocket(websocket: WebSocket):
+    """
+    WebSocket endpoint for load-testing server resiliency and scale.
+    Echoes back messages and periodically sends heartbeat pings.
+    """
+    await websocket.accept()
+    logger.info("Loadtest WebSocket client connected.")
+    try:
+        while True:
+            try:
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
+                # Echo back the received message
+                await websocket.send_text(json.dumps({
+                    "type": "echo",
+                    "message": data,
+                    "ts": time.time(),
+                }))
+            except asyncio.TimeoutError:
+                # Send heartbeat ping if no message received in timeout window
+                await websocket.send_text(json.dumps({
+                    "type": "heartbeat",
+                    "message": "ping",
+                    "ts": time.time(),
+                }))
+    except WebSocketDisconnect:
+        logger.info("Loadtest WebSocket client disconnected.")
+    except Exception as e:
+        logger.error(f"Loadtest WebSocket error: {e}", exc_info=True)
 
 # --------------------------------------------------------------------------- #
 #  local dev entry-point
 # --------------------------------------------------------------------------- #
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8010)
+    port = int(os.getenv("PORT", 8010))
+    uvicorn.run(app, host="0.0.0.0", port=port, proxy_headers=True)

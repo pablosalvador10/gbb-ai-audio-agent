@@ -178,3 +178,15 @@ node_modules/
 records/
 
 .DS_Store
+.azure
+
+*.pem
+*.key
+*.crt
+*.csr
+*.pfx
+*.cer
+*.der
+*.p12
+*.b64
+.ssl/
