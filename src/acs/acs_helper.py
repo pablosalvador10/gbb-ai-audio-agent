@@ -1,4 +1,59 @@
-import asyncio
+
+
+"""
+ACS Helper Module
+
+This module provides helpers for working with Azure Communication Services.
+
+# Recording Calls with Azure Communication Services
+
+## Container URL Format
+
+The `AzureBlobContainerRecordingStorage` class requires a container URL with a 
+Shared Access Signature (SAS) token, not a connection string. The URL format is:
+
+```
+https://<storage-account-name>.blob.core.windows.net/<container-name>?<sas-token>
+```
+
+## Required Container Permissions
+
+The SAS token must include the following permissions:
+- Read (r)
+- Add (a)
+- Create (c) 
+- Write (w)
+- Delete (d)
+- List (l)
+
+## Usage Example
+
+```python
+# Generate a container URL with SAS token
+container_url = acs_caller.generate_container_sas_url(
+    account_name="yourstorageaccount",
+    container_name="recordings",
+    account_key="your_storage_account_key",
+    expiry_hours=24
+)
+
+# Start recording a call
+await acs_caller.start_recording(
+    call_id="your_call_id",
+    callback_url="https://yourapp.com/recording/callbacks", 
+    container_url=container_url
+)
+```
+
+## Security Best Practices
+
+1. Generate new SAS tokens periodically
+2. Set expiry times to the minimum required
+3. Use container-level SAS tokens, not account-level
+4. Configure storage account network rules to restrict access
+5. Enable Azure Storage logging to track access
+"""
+
 import logging
 
 from aiohttp import web
@@ -10,12 +65,17 @@ from azure.communication.callautomation import (
     MediaStreamingContentType,
     MediaStreamingOptions,
     MediaStreamingTransportType,
+    AzureBlobContainerRecordingStorage,
     PhoneNumberIdentifier,
-    SsmlSource,
-    TextSource,
+    RecordingChannel,
+    RecordingContent, 
+    RecordingFormat,
 )
 from azure.core.exceptions import HttpResponseError
 from azure.core.messaging import CloudEvent
+from src.blob.blob_helper import save_transcript_to_blob
+
+from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +94,7 @@ class AcsCaller:
         acs_connection_string: str,
         acs_callback_path: str,
         acs_media_streaming_websocket_path: str,
+        media_streaming_configuration: MediaStreamingOptions = None,
         # tts_translator: SpeechCoreTranslator
     ):
         self.source_number = source_number
@@ -45,18 +106,19 @@ class AcsCaller:
         logger.info(
             f"AcsCaller initialized. Callback URL: {self.acs_callback_path}, WebSocket URL: {self.websocket_url}"
         )
-        self.media_streaming_configuration = MediaStreamingOptions(
-            transport_url=self.websocket_url,  # Use the full websocket URL
-            transport_type=MediaStreamingTransportType.WEBSOCKET,
-            content_type=MediaStreamingContentType.AUDIO,
-            audio_channel_type=MediaStreamingAudioChannelType.UNMIXED,
-            start_media_streaming=True,
-            enable_bidirectional=True,
-            audio_format=AudioFormat.PCM16_K_MONO,  # Ensure this matches what your STT expects
-        )
-        # Initialize CallAutomationClient here to reuse it
+        if media_streaming_configuration is None:
+            self.media_streaming_configuration = MediaStreamingOptions(
+                transport_url=self.websocket_url,  # Use the full websocket URL
+                transport_type=MediaStreamingTransportType.WEBSOCKET,
+                content_type=MediaStreamingContentType.AUDIO,
+                audio_channel_type=MediaStreamingAudioChannelType.UNMIXED,
+                start_media_streaming=True,
+                enable_bidirectional=True,
+                audio_format=AudioFormat.PCM16_K_MONO,  # Ensure this matches what your STT expects
+            )
+        else:
+            self.media_streaming_configuration = media_streaming_configuration    # Initialize CallAutomationClient here to reuse it
         try:
-            # self.call_automation_client = CallAutomationClient.from_connection_string(self.acs_connection_string)
             self.call_automation_client = CallAutomationClient.from_connection_string(
                 self.acs_connection_string
             )
@@ -208,118 +270,304 @@ class AcsCaller:
         return web.json_response(
             {"status": "events processed", "handled_events": handled_events}, status=200
         )
-        # return web.Response(status=200)
+
 
     def get_call_connection(self, call_connection_id: str):
         """
         Retrieve the call connection details using the call connection ID.
+        
+        Parameters:
+        -----------
+        call_connection_id: str
+            The ID of the call connection to retrieve
+            
+        Returns:
+        --------
+        CallConnectionClient or None
+            The call connection client if found, None otherwise
+        
+        Raises:
+        -------
+        HttpResponseError
+            If there's an authentication or permission issue with the call (includes error code 8527)
         """
+        if not call_connection_id:
+            logger.error("Cannot get call connection: call_connection_id is empty or None")
+            return None
+            
+        if not self.call_automation_client:
+            logger.error("CallAutomationClient not initialized. Cannot get call connection.")
+            return None
+            
         try:
-            call_connection = self.call_automation_client.get_call_connection(
-                call_connection_id
-            )
+            call_connection = self.call_automation_client.get_call_connection(call_connection_id)
+            if call_connection:
+                logger.info(f"Successfully retrieved call connection for ID: {call_connection_id}")
+            else:
+                logger.warning(f"No call connection found for ID: {call_connection_id}")
             return call_connection
+        except HttpResponseError as e:
+            # Extract useful error details for ACS-specific errors
+            logger.error(f"ACS HTTP Error getting call connection: Status={e.status_code}, Message={e.message}", exc_info=True)
+            if hasattr(e, 'error') and hasattr(e.error, 'code') and e.error.code == '8527':
+                logger.error("Invalid join identity error (8527): Cannot join call with the provided identity")
+            raise  # Re-raise to allow specific handling by the caller
         except Exception as e:
             logger.error(f"Error retrieving call connection: {e}", exc_info=True)
             return None
 
-    async def play_agent_tts(self, call_connection_id: str, text: str):
-        call_conn = self.call_automation_client.get_call_connection(call_connection_id)
-        tts = TextSource(text=text, voice_name="en-US-JennyNeural")
-        # Always use the interrupt flag to preempt any ongoing media operation
-        await call_conn.play_media_to_all(
-            play_source=tts, loop=False, interrupt_call_media_operation=True
-        )
 
-    async def play_response(  # Changed to async def
-        self,
-        call_connection_id: str,
-        response_text: str,
-        use_ssml: bool = False,
-        voice_name: str = "en-US-JennyMultilingualNeural",
-        locale: str = "en-US",
-    ):
+    async def start_transcript(self, call_id: str):
         """
-        Plays `response_text` into the given ACS call, using the SpeechConfig
-        :param call_connection_id: ACS callConnectionId
-        :param response_text:      Plain text or SSML to speak
-        :param use_ssml:           If True, wrap in SsmlSource; otherwise TextSource
+        Starts a transcript for the given call_id.
+        This could be a placeholder for any logic needed to mark the beginning of a transcript.
         """
-        # 1) Get the call-specific client
-        call_conn = self.call_automation_client.get_call_connection(call_connection_id)
-        if not call_conn:
-            logger.error(
-                f"Could not get call connection object for {call_connection_id}. Cannot play media."
-            )
-            return  # Or raise an error
-            # Check if response_text is empty or None
-        if not response_text:
-            logger.info(
-                f"Skipping media playback for call {call_connection_id} because response_text is empty."
-            )
-            return
-        # 2) Build the Source with the same settings
-        if use_ssml:
-            # Assume response_text is a full SSML document
-            source = SsmlSource(ssml_text=response_text)
-        else:
-            source = TextSource(
-                text=response_text, voice_name=voice_name, source_locale=locale
-            )
+        logger.info(f"Transcript started for call_id: {call_id}, however, actual implementation is not provided.")
 
-        await safe_play_media_with_retry(call_conn, source, call_connection_id)
-
-
-async def safe_play_media_with_retry(
-    call_conn,
-    play_source,
-    call_connection_id: str,
-    max_retries: int = 5,
-    initial_backoff: float = 0.5,
-):
-    """
-    Hardened helper to safely play media in ACS calls with retry on 8500 errors.
-
-    Args:
-        call_conn: CallConnection object from CallAutomationClient.get_call_connection()
-        play_source: TextSource or SsmlSource to play
-        call_connection_id: ID of the active call connection
-        max_retries: Maximum number of retries on 8500 errors
-        initial_backoff: Initial backoff time in seconds
-    """
-    for attempt in range(max_retries):
+    
+    
+    async def end_transcript(self, call_id: str, transcript: str):
+        """
+        Ends the transcript for the given call_id and saves it to Azure Blob Storage.
+        """
+        logger.info(f"Ending transcript for call_id: {call_id}")
         try:
-            call_conn.play_media(
-                play_source=play_source, loop=False, interrupt_call_media_operation=True
-            )
-            logger.info(
-                f"✅ Successfully played media on attempt {attempt + 1} for call {call_connection_id}"
-            )
-            return
-        except HttpResponseError as e:
-            if e.status_code == 8500 or "Media operation is already active" in str(
-                e.message
-            ):
-                wait_time = initial_backoff * (2**attempt)  # Exponential backoff
-                logger.warning(
-                    f"⏳ Media active (8500) error on attempt {attempt + 1} for call {call_connection_id}. Retrying after {wait_time:.1f}s..."
-                )
-                await asyncio.sleep(wait_time)
-                # try:
-                #     await call_conn.cancel_all_media_operations()
-                #     logger.info(f"🔄 Issued cancel_all_media_operations after 8500 on attempt {attempt + 1}")
-                # except Exception as cancel_err:
-                #     logger.warning(f"⚠️ Failed to cancel media operations during retry handling: {cancel_err}")
-            else:
-                logger.error(f"❌ Unexpected ACS error during play_media: {e}")
-                raise  # Immediately fail on non-8500 errors
+            await save_transcript_to_blob(call_id, transcript)
+            logger.info(f"Transcript for call_id {call_id} saved to blob storage.")
         except Exception as e:
-            logger.error(f"❌ Unexpected exception during play_media: {e}")
-            raise  # Immediately fail for non-HTTP errors
+            logger.error(f"Failed to save transcript for call_id {call_id}: {e}", exc_info=True)
 
-    logger.error(
-        f"🚨 Failed to play media after {max_retries} retries for call {call_connection_id}"
-    )
-    raise RuntimeError(
-        f"Failed to play media after {max_retries} retries for call {call_connection_id}"
-    )
+    async def start_recording_for_participants(
+        self,
+        server_call_id: str,
+        participants: List[Dict[str, Any]],
+        recording_callback_url: str,
+        storage_account_name: str,
+        recording_container: str,
+        minimum_participants: int = 2
+    ) -> Dict[str, Any]:
+        """
+        🎬 Start recording for a call when sufficient participants are present
+        
+        Following Azure best practices for ACS recording management:
+        - Validates participant count before attempting recording
+        - Uses unmixed audio channels for better quality
+        - Handles authentication and storage configuration errors
+        - Returns structured response for proper error handling
+        
+        Args:
+            server_call_id: The ACS server call identifier
+            participants: List of participant data from ACS event
+            recording_callback_url: Full URL for recording state callbacks
+            storage_account_name: Azure Storage account name for recordings
+            recording_container: Blob container name for storing recordings
+            minimum_participants: Minimum participants required to start recording (default: 2)
+            
+        Returns:
+            Dict containing recording result with success status and details
+            
+        Raises:
+            ValueError: If required configuration is missing or invalid
+            HttpResponseError: If ACS recording API call fails
+        """
+        logger.info(f"🎬 Starting recording process for call {server_call_id}")
+        
+        # Validate inputs following Azure best practices
+        if not server_call_id:
+            raise ValueError("server_call_id cannot be empty")
+        if not storage_account_name:
+            raise ValueError("storage_account_name is required for recording")
+        if not recording_container:
+            raise ValueError("recording_container is required for recording")
+        if not recording_callback_url:
+            raise ValueError("recording_callback_url is required for recording")
+            
+        # Extract and validate participant identifiers
+        participant_ids = []
+        for participant in participants:
+            identifier = participant.get("identifier", {})
+            raw_id = identifier.get("rawId")
+            if raw_id:
+                participant_ids.append(raw_id)
+                logger.info(f"👤 Found participant: {raw_id}")
+        
+        logger.info(f"📊 Total participants for call {server_call_id}: {len(participant_ids)}")
+        
+        # Check minimum participant requirement
+        if len(participant_ids) < minimum_participants:
+            return {
+                "success": False,
+                "reason": "insufficient_participants",
+                "participant_count": len(participant_ids),
+                "minimum_required": minimum_participants,
+                "message": f"Recording requires at least {minimum_participants} participants, found {len(participant_ids)}"
+            }
+        
+        try:
+            # Construct container URL following Azure Storage conventions
+            container_url = f"https://{storage_account_name}.blob.core.windows.net/{recording_container}"
+            logger.info(f"🗂️ Using storage container: {container_url}")
+            
+            # Create recording storage configuration
+            recording_storage = AzureBlobContainerRecordingStorage(
+                container_url=container_url
+            )
+            
+            # Start recording with optimal configuration for voice AI
+            logger.info(f"🎙️ Initiating recording for call {server_call_id}")
+            recording_response = self.call_automation_client.start_recording(
+                server_call_id=server_call_id,
+                recording_state_callback_url=recording_callback_url,
+                recording_content_type=RecordingContent.Audio,
+                recording_channel_type=RecordingChannel.Unmixed,  # Better for AI processing
+                recording_format_type=RecordingFormat.Wav,         # Optimal for speech processing
+                recording_storage=recording_storage
+            )
+            
+            logger.info(f"✅ Recording started successfully for call {server_call_id}")
+            
+            return {
+                "success": True,
+                "recording_id": getattr(recording_response, 'recording_id', None),
+                "server_call_id": server_call_id,
+                "participant_count": len(participant_ids),
+                "storage_location": container_url,
+                "recording_format": "wav",
+                "channel_type": "unmixed",
+                "message": "Recording started successfully"
+            }
+            
+        except HttpResponseError as e:
+            # Handle ACS-specific authentication and permission errors
+            error_code = getattr(e.error, 'code', 'unknown') if hasattr(e, 'error') else 'unknown'
+            
+            if "8527" in str(e) or "Invalid join identity" in str(e):
+                logger.error(f"❌ ACS authentication error for call {server_call_id}: {e.message}")
+                logger.error("💡 This typically indicates missing Azure Storage permissions")
+                logger.error("💡 Ensure ACS has access to the storage account and container")
+                
+                return {
+                    "success": False,
+                    "reason": "authentication_error",
+                    "error_code": error_code,
+                    "message": "Authentication error - check ACS storage permissions",
+                    "troubleshooting": "Verify Azure Storage permissions for ACS service"
+                }
+            else:
+                logger.error(f"❌ ACS HTTP error starting recording: {e.status_code} - {e.message}")
+                
+                return {
+                    "success": False,
+                    "reason": "acs_api_error",
+                    "error_code": error_code,
+                    "status_code": e.status_code,
+                    "message": f"ACS API error: {e.message}"
+                }
+                
+        except Exception as e:
+            logger.error(f"❌ Unexpected error starting recording for call {server_call_id}: {e}", exc_info=True)
+            
+            return {
+                "success": False,
+                "reason": "unexpected_error",
+                "message": f"Unexpected error: {str(e)}",
+                "server_call_id": server_call_id
+            }
+
+    async def stop_recording(
+        self,
+        server_call_id: str,
+        recording_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        🛑 Stop recording for a call
+        
+        Args:
+            server_call_id: The ACS server call identifier
+            recording_id: Optional recording identifier for specific recording
+            
+        Returns:
+            Dict containing stop recording result
+        """
+        logger.info(f"🛑 Stopping recording for call {server_call_id}")
+        
+        try:
+            if not self.call_automation_client:
+                raise RuntimeError("CallAutomationClient not initialized")
+            
+            # Stop the recording
+            stop_response = self.call_automation_client.stop_recording(
+                server_call_id=server_call_id
+            )
+            
+            logger.info(f"✅ Recording stopped successfully for call {server_call_id}")
+            
+            return {
+                "success": True,
+                "server_call_id": server_call_id,
+                "recording_id": recording_id,
+                "message": "Recording stopped successfully"
+            }
+            
+        except HttpResponseError as e:
+            logger.error(f"❌ ACS error stopping recording: {e.status_code} - {e.message}")
+            return {
+                "success": False,
+                "reason": "acs_api_error",
+                "status_code": e.status_code,
+                "message": f"Failed to stop recording: {e.message}"
+            }
+        except Exception as e:
+            logger.error(f"❌ Unexpected error stopping recording: {e}", exc_info=True)
+            return {
+                "success": False,
+                "reason": "unexpected_error",
+                "message": f"Unexpected error: {str(e)}"
+            }
+
+    async def get_recording_properties(
+        self,
+        server_call_id: str
+    ) -> Dict[str, Any]:
+        """
+        📋 Get recording properties for a call
+        
+        Args:
+            server_call_id: The ACS server call identifier
+            
+        Returns:
+            Dict containing recording properties and status
+        """
+        logger.info(f"📋 Getting recording properties for call {server_call_id}")
+        
+        try:
+            if not self.call_automation_client:
+                raise RuntimeError("CallAutomationClient not initialized")
+            
+            # Get recording properties
+            properties = self.call_automation_client.get_recording_properties(
+                server_call_id=server_call_id
+            )
+            
+            return {
+                "success": True,
+                "server_call_id": server_call_id,
+                "recording_state": getattr(properties, 'recording_state', 'unknown'),
+                "recording_id": getattr(properties, 'recording_id', None),
+                "properties": properties
+            }
+            
+        except HttpResponseError as e:
+            logger.error(f"❌ ACS error getting recording properties: {e.message}")
+            return {
+                "success": False,
+                "reason": "acs_api_error",
+                "message": f"Failed to get recording properties: {e.message}"
+            }
+        except Exception as e:
+            logger.error(f"❌ Error getting recording properties: {e}", exc_info=True)
+            return {
+                "success": False,
+                "reason": "unexpected_error",
+                "message": f"Unexpected error: {str(e)}"
+            }
