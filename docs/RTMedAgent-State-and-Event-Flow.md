@@ -54,7 +54,7 @@ sequenceDiagram
     participant API as Agentic Backend (FastAPI)
     participant Redis as Azure Redis
     participant EG as Azure Event Grid
-    participant Func as Subscriber (Azure Function)
+    participant Func as Subscriber (Container App/Function)
 
     FE->>API: Join Call (WebSocket)
     ACS->>API: Audio Stream + Call Events
@@ -93,7 +93,7 @@ graph LR
     ACS -->|Inbound Call + Audio Stream| Backend
     FE -->|WebSocket<br>User Audio / Controls| Backend
     Backend -->|PushAudioStream<br>Text| AzureSpeech
-    Backend -->|TTS Injection| ACS
+    Backend -->|TTS Injection over WebSocket| ACS
     Backend -->|Transcripts| AzureOpenAI
     Backend -->|Metadata, Context| Redis
     Backend -->|Event: CALL_STARTED, ERROR| EventGrid
