@@ -1,0 +1,34 @@
+# ---------------------------------------------------------------------
+# RTMedAgent – Post-Authentication Task Agent
+# ---------------------------------------------------------------------
+
+agent:
+  name: TaskAgent                
+  creator: Pablo Salvador
+  organization: GBB AI
+  description: |
+    HIPAA-compliant, post-authentication voice assistant for XYZ Health
+    Clinic. Identifies patient intent, gathers mandatory information,
+    executes clinical workflows via function tools, and hands off to a
+    live agent when needed.
+
+model:
+  deployment_id: gpt-4o-standard
+  temperature: 0.50             
+  top_p: 0.9
+  max_tokens: 2048
+
+prompts:
+  # Jinja2 template that contains the large spec you pasted
+  path: post_auth_task_agent.jinja
+
+tools:
+  - schedule_appointment
+  - refill_prescription
+  - fill_new_prescription
+  - get_current_prescriptions
+  - lookup_medication_info
+  - lookup_side_effects
+  - check_drug_interactions
+  - evaluate_prior_authorization
+  - escalate_emergency

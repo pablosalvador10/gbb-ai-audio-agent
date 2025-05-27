@@ -77,22 +77,13 @@ remove_conda_env:
 # Target to run the Streamlit app locally
 
 stt_aoai_tts_server: 
-	python usecases/browser_RTMedAgent/backend/server.py
-
-stt_aoai_tts_server_v2: 
-	python usecases/browser_RTMedAgent/backend/servertest.py
-
-stt_aoai_tts_server_v3: 
-	python usecases/browser_RTMedAgent/backend/main.py
-	
-stt_aoai_transcribe_microphone: 
-	python usecases/acs_gpt4o_transcribe/app/microphone_transcribe.py
-
-stt_aoai_transcribe_server: 
-	python usecases/acs_gpt4o_transcribe/app/acs_transcribe.py
+	python rtagents/RTMedAgent/backend/main.py
 
 stt_aoai_tts_browser: 
-	cd usecases/browser_RTMedAgent/frontend && npm install && npm run dev
+	cd rtagents/RTMedAgent/frontend && npm install && npm run dev
+
+stt_aoai_transcribe_microphone: 
+	python rtagents/acs_gpt4o_transcribe/app/microphone_transcribe.py
 
 run_pylint:
 	@echo "Running linter"

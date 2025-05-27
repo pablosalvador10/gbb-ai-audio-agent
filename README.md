@@ -35,7 +35,7 @@ If you're new to Azure AI Speech and Azure OpenAI, specilaly on the realtime rea
 
 ### **🏥 Use Cases**
 
-#### **📝 [Voice-to-Voice Experience with RTMedAgent (Web-Powered AI Assistant)](usecases/browser_RTMedAgent/README.md)**
+#### **📝 [Voice-to-Voice Experience with RTMedAgent (Web-Powered AI Assistant)](rtagents/browser_RTMedAgent/README.md)**
 
 This use case demonstrates how to deliver real-time, AI-powered healthcare conversations using Azure and OpenAI services. It transforms natural patient voice interactions into structured, actionable outcomes by orchestrating multiple services into one seamless agentic system.
 

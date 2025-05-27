@@ -1,0 +1,27 @@
+version: '3.8'
+services:
+  nginx:
+    image: nginx:alpine
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "80:80"
+    depends_on:
+      - fastapi_backend
+      - aiohttp_realtime
+
+  fastapi_backend:
+    build:
+      context: ./fastapi_backend
+    environment:
+      - AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}
+      - AZURE_OPENAI_KEY=${AZURE_OPENAI_KEY}
+      - AZURE_OPENAI_CHAT_DEPLOYMENT_ID=${AZURE_OPENAI_CHAT_DEPLOYMENT_ID}
+
+  aiohttp_realtime:
+    build:
+      context: ./aiohttp_realtime
+    environment:
+      - AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}
+      - AZURE_OPENAI_KEY=${AZURE_OPENAI_KEY}
+      - AZURE_OPENAI_CHAT_DEPLOYMENT_ID=${AZURE_OPENAI_CHAT_DEPLOYMENT_ID}
