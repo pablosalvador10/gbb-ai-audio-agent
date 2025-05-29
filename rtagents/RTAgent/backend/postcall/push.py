@@ -1,5 +1,5 @@
 import datetime
-from rtagents.RTMedAgent.backend.orchestration.conversation_state import (
+from rtagents.RTAgent.backend.orchestration.conversation_state import (
     ConversationManager,
 )
 from src.cosmosdb.manager import CosmosDBMongoCoreManager

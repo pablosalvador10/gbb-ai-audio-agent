@@ -163,6 +163,10 @@ class SpeechSynthesizer:
             if error_details:
                 logger.error(f"Error details: {error_details.error_details}")
                 logger.error(f"Error code: {error_details.error_code}")
+                if error_details.error_code == speechsdk.CancellationErrorCode.AuthenticationFailure:
+                    logger.error("Authentication failure: Check your subscription key and region.")
+                elif error_details.error_code == speechsdk.CancellationErrorCode.BadRequest:
+                    logger.error("Bad request: Verify the SSML structure and input parameters.")
             raise RuntimeError(f"TTS failed: {result.reason}")
 
         # 5) Get raw PCM bytes from the result

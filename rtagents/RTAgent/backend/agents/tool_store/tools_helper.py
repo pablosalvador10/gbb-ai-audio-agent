@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict
 from fastapi import WebSocket
 
 from utils.ml_logging import get_logger
-from rtagents.RTMedAgent.backend.agents.tool_store.functions import (
+from rtagents.RTAgent.backend.agents.tool_store.functions import (
     authenticate_user,
     check_drug_interactions,
     escalate_emergency,

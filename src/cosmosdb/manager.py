@@ -5,11 +5,11 @@ from typing import Any, Dict, List, Optional
 import pymongo
 from dotenv import load_dotenv
 from pymongo.errors import DuplicateKeyError, PyMongoError
+from azure.identity import DefaultAzureCredential
+from azure.cosmos.cosmos_client import CosmosClient
 
 # Initialize logging
 logger = logging.getLogger(__name__)
-
-
 class CosmosDBMongoCoreManager:
     def __init__(
         self,
@@ -19,16 +19,22 @@ class CosmosDBMongoCoreManager:
     ):
         """
         Initialize the CosmosDBMongoCoreManager for connecting to Cosmos DB using MongoDB API.
+        If no connection string is provided, use DefaultAzureCredential for authentication.
         """
         load_dotenv()
-        connection_string = connection_string or os.getenv(
-            "AZURE_COSMOS_CONNECTION_STRING"
-        )
+        connection_string = connection_string or os.getenv("AZURE_COSMOS_CONNECTION_STRING")
         database_name = database_name or os.getenv("AZURE_COSMOS_DATABASE_NAME")
         collection_name = collection_name or os.getenv("AZURE_COSMOS_COLLECTION_NAME")
+
         try:
-            # Initialize the MongoClient with the connection string
-            self.client = pymongo.MongoClient(connection_string)
+            if connection_string:
+                # Initialize the MongoClient with the connection string
+                self.client = pymongo.MongoClient(connection_string)
+            else:
+                # Use DefaultAzureCredential for authentication
+                credential = DefaultAzureCredential()
+                self.client = CosmosClient(credential=credential)
+            
             self.database = self.client[database_name]
             self.collection = self.database[collection_name]
             logger.info(
@@ -36,6 +42,9 @@ class CosmosDBMongoCoreManager:
             )
         except PyMongoError as e:
             logger.error(f"Failed to connect to Cosmos DB: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Failed to authenticate with DefaultAzureCredential: {e}")
             raise
 
     def insert_document(self, document: Dict[str, Any]) -> Optional[Any]:

@@ -14,7 +14,7 @@ from typing import Any, Dict, Optional
 from fastapi import WebSocket
 
 from utils.ml_logging import get_logger
-from rtagents.RTMedAgent.backend.settings import STOP_WORDS
+from rtagents.RTAgent.backend.settings import STOP_WORDS
 
 logger = get_logger("helpers")
 

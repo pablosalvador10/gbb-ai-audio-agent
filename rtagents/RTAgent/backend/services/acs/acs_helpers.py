@@ -9,9 +9,9 @@ import json
 from base64 import b64encode
 from typing import List, Optional
 
-from fastapi import WebSocket
+from fastapi import WebSocket, WebSocketDisconnect
 from src.acs.acs_helper import AcsCaller
-from rtagents.RTMedAgent.backend.settings import (
+from rtagents.RTAgent.backend.settings import (
     ACS_CALLBACK_PATH,
     ACS_CONNECTION_STRING,
     ACS_SOURCE_PHONE_NUMBER,
@@ -182,7 +182,14 @@ async def send_pcm_frames(ws: WebSocket, pcm_bytes: bytes, sample_rate: int):
         b64 = b64encode(frame).decode("ascii")
 
         payload = {"kind": "AudioData", "audioData": {"data": b64}, "stopAudio": None}
-        await ws.send_text(json.dumps(payload))
+        try:
+            await ws.send_text(json.dumps(payload))
+        except WebSocketDisconnect:
+            logger.warning("WebSocket disconnected while sending PCM frames.")
+            break
+        except Exception as e:
+            logger.error(f"Error while sending PCM frames: {e}")
+            break
 
 
 async def send_data(websocket, buffer):

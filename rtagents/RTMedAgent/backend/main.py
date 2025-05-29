@@ -13,10 +13,14 @@ from __future__ import annotations
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+import os
+import sys
+
+# Add the backend directory to the Python path
+sys.path.append(os.path.dirname(__file__))
 
 from utils.ml_logging import get_logger
-import os
-from rtagents.RTMedAgent.backend.settings import (
+from settings import (
     ALLOWED_ORIGINS,
     AOAI_STT_KEY,
     AOAI_STT_ENDPOINT,
@@ -38,11 +42,9 @@ from services import (
     CosmosDBMongoCoreManager,
     AzureRedisManager,
 )
-from rtagents.RTMedAgent.backend.services.acs.acs_caller import (
-    initialize_acs_caller_instance,
-)
+from services.acs.acs_caller import initialize_acs_caller_instance
 from routers import router as api_router
-from rtagents.RTMedAgent.backend.agents.base import RTAgent
+from agents.base import RTAgent
 
 logger = get_logger("main")
 

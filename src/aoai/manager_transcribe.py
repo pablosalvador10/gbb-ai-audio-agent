@@ -140,7 +140,19 @@ class TranscriptionClient:
 
     async def send_json(self, data: dict) -> None:
         if self.ws:
-            await self.ws.send(json.dumps(data))
+            try:
+                if hasattr(self.ws, 'closed'):
+                    if not self.ws.closed:
+                        await self.ws.send(json.dumps(data))
+                    else:
+                        print("⚠️ WebSocket connection is closed.")
+                else:
+                    # fallback for very old versions
+                    await self.ws.send(json.dumps(data))
+            except AttributeError as e:
+                print(f"❌ Attribute error: {e}")
+            except websockets.exceptions.ConnectionClosedOK:
+                print("⚠️ WebSocket connection closed gracefully (1000).")
 
     async def send_audio_chunk(self, audio_data: bytes) -> None:
         audio_base64 = base64.b64encode(audio_data).decode("utf-8")

@@ -12,7 +12,7 @@ import json
 import time
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Sequence
-from rtagents.RTMedAgent.backend.agents.base import BaseAgent
+from rtagents.RTAgent.backend.agents.base import BaseAgent
 
 from mem0 import Memory
 from openai import AsyncAzureOpenAI

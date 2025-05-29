@@ -19,33 +19,45 @@ import contextlib
 
 from azure.core.exceptions import HttpResponseError
 from azure.core.messaging import CloudEvent
-from rtagents.RTMedAgent.backend.services.acs.acs_helpers import stop_audio
+from rtagents.RTAgent.backend.services.acs.acs_helpers import stop_audio
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.websockets import WebSocketState
 from pydantic import BaseModel
 
-from rtagents.RTMedAgent.backend.orchestration.conversation_state import (
+from rtagents.RTAgent.backend.orchestration.conversation_state import (
     ConversationManager,
 )
 from src.aoai.manager_transcribe import AudioTranscriber
 from helpers import check_for_stopwords
-from rtagents.RTMedAgent.backend.latency.latency_tool import LatencyTool
-from rtagents.RTMedAgent.backend.orchestration.orchestrator import route_turn
+from rtagents.RTAgent.backend.latency.latency_tool import LatencyTool
+from rtagents.RTAgent.backend.orchestration.orchestrator import route_turn
 from shared_ws import (
     broadcast_message,
     send_response_to_acs,
 )
-from rtagents.RTMedAgent.backend.postcall.push import build_and_flush
-from rtagents.RTMedAgent.backend.settings import (
+from rtagents.RTAgent.backend.postcall.push import build_and_flush
+from rtagents.RTAgent.backend.settings import (
     ACS_CALL_PATH,
     ACS_CALLBACK_PATH,
     ACS_WEBSOCKET_PATH,
 )
+from rtagents.RTAgent.backend.services.acs.events import ACSEventManager, RecordingConfig
 from utils.ml_logging import get_logger
 
 logger = get_logger("routers.acs")
 router = APIRouter()
+
+# Initialize ACS Event Manager with recording configuration
+recording_config = RecordingConfig(
+    auto_start_on_connect=True,
+    auto_stop_on_disconnect=True,
+    recording_format="wav",
+    recording_channel="unmixed",
+    storage_container="call-recordings",
+    enable_transcription=False,
+)
+acs_event_manager = ACSEventManager(recording_config)
 
 
 # --------------------------------------------------------------------------- #
@@ -75,31 +87,59 @@ async def initiate_call(call: CallRequest, request: Request):
 
 
 # --------------------------------------------------------------------------- #
-#  2. Callback events  (POST /call/callbacks)
+#  2. Callback events  (POST /call/callbacks)  
 # --------------------------------------------------------------------------- #
 @router.post(ACS_CALLBACK_PATH)
 async def callbacks(request: Request):
+    """
+    Enhanced ACS callback handler with comprehensive event management.
+    
+    Features:
+    - Automatic recording start/stop based on call events
+    - Session tracking and state management
+    - Comprehensive error handling and logging
+    - Integration with existing conversation management
+    """
     if not request.app.state.acs_caller:
         return JSONResponse({"error": "ACS not initialised"}, status_code=503)
 
     try:
         events = await request.json()
-        for raw in events:
-            event = CloudEvent.from_dict(raw)
-            etype = event.type
-            cid = event.data.get("callConnectionId")
-            emoji = {
-                "Microsoft.Communication.CallConnected": "📞",
-                "Microsoft.Communication.CallDisconnected": "❌",
-                "Microsoft.Communication.MediaStreamingStarted": "🎙️",
-                "Microsoft.Communication.MediaStreamingStopped": "🛑",
-            }.get(etype, "ℹ️")
-
-            # await broadcast_message(request.app.state.clients, f"{emoji} {etype}")
-            logger.info("%s %s", etype, cid)
-        return {"status": "callback received"}
-    except Exception as exc:  # pylint: disable=broad-except
-        logger.error("Callback error: %s", exc, exc_info=True)
+        
+        # Process events through the centralized event manager
+        result = await acs_event_manager.process_callback_events(request, events)
+        
+        # Log processing results
+        logger.info(
+            "ACS callback events processed",
+            extra={
+                "correlation_id": result.get("correlation_id"),
+                "processed_count": len(result.get("processed_events", [])),
+                "error_count": len(result.get("errors", [])),
+                "status": result.get("status"),
+            }
+        )
+        
+        # Handle any processing errors
+        if result.get("errors"):
+            logger.warning(
+                "Some events had processing errors",
+                extra={
+                    "errors": result["errors"],
+                    "correlation_id": result.get("correlation_id"),
+                }
+            )
+            
+        # Return structured response
+        return {
+            "status": "callback processed",
+            "correlation_id": result.get("correlation_id"),
+            "processed_events": len(result.get("processed_events", [])),
+            "errors": result.get("errors", []),
+        }
+        
+    except Exception as exc:
+        logger.error("Callback processing error: %s", exc, exc_info=True)
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
@@ -235,9 +275,16 @@ async def acs_media_ws(ws: WebSocket):
 
     # ── per-call objects ────────────────────────────────────────────────────
     redis_mgr = ws.app.state.redis
-    cm = ConversationManager.from_redis(cid, redis_mgr)
-    ws.state.cm = cm
-    ws.state.lt = LatencyTool(cm)
+    try:
+        cm = await ConversationManager.from_redis(cid, redis_mgr)
+        if not cm:
+            raise ValueError(f"Failed to initialize ConversationManager with Redis for call ID: {cid}")
+        ws.state.cm = cm
+        ws.state.lt = LatencyTool(cm)
+    except Exception as e:
+        logger.error(f"Error initializing ConversationManager or LatencyTool: {e}", exc_info=True)
+        await ws.close(code=1011)
+        return
 
     # greeting (once per call)
     if cid not in ws.app.state.greeted_call_ids:
@@ -247,7 +294,7 @@ async def acs_media_ws(ws: WebSocket):
         )
         await broadcast_message(ws.app.state.clients, greet, "Assistant")
         await send_response_to_acs(ws, greet)
-        cm.append_to_history("assistant", greet)
+        await cm.append_to_history("assistant", greet)
         ws.app.state.greeted_call_ids.add(cid)
 
     # ---------- AOAI Streaming STT ----------------------------------------
@@ -365,9 +412,10 @@ async def acs_media_ws(ws: WebSocket):
         with contextlib.suppress(Exception):
             await transcribe_task
         with contextlib.suppress(Exception):
-            await ws.close()
+            if ws.client_state == WebSocketState.CONNECTED:
+                await ws.close()
         call_user_raw_ids.pop(cid, None)
-        cm.persist_to_redis(redis_mgr)
+        await cm.persist_to_redis(redis_mgr)
         try:
             cm = getattr(ws.state, "cm", None)
             cosmos = getattr(ws.app.state, "cosmos", None)
@@ -376,3 +424,87 @@ async def acs_media_ws(ws: WebSocket):
         except Exception as e:
             logger.error(f"Error persisting analytics: {e}", exc_info=True)
         logger.info("◀ media WS closed – %s", cid)
+
+
+# --------------------------------------------------------------------------- #
+#  Session Management and Recording Information Endpoints
+# --------------------------------------------------------------------------- #
+@router.get("/call/sessions")
+async def get_active_sessions():
+    """Get information about all active call sessions."""
+    try:
+        sessions = acs_event_manager.list_active_sessions()
+        
+        # Convert sessions to serializable format
+        session_data = {}
+        for call_id, session in sessions.items():
+            session_data[call_id] = {
+                "call_connection_id": session.call_connection_id,
+                "server_call_id": session.server_call_id,
+                "participant_raw_id": session.participant_raw_id,
+                "recording_id": session.recording_id,
+                "recording_state": session.recording_state,
+                "connected_at": session.connected_at.isoformat() if session.connected_at else None,
+                "disconnected_at": session.disconnected_at.isoformat() if session.disconnected_at else None,
+                "media_streaming_active": session.media_streaming_active,
+                "recording_url": session.recording_url,
+            }
+            
+        return {
+            "active_sessions": session_data,
+            "total_count": len(session_data),
+        }
+        
+    except Exception as exc:
+        logger.error("Error getting active sessions: %s", exc, exc_info=True)
+        raise HTTPException(500, str(exc)) from exc
+
+
+@router.get("/call/{call_connection_id}/session")
+async def get_call_session(call_connection_id: str):
+    """Get detailed information about a specific call session."""
+    try:
+        session = acs_event_manager.get_session_info(call_connection_id)
+        
+        if not session:
+            raise HTTPException(404, f"No session found for call ID: {call_connection_id}")
+            
+        return {
+            "call_connection_id": session.call_connection_id,
+            "server_call_id": session.server_call_id,
+            "participant_raw_id": session.participant_raw_id,
+            "recording_id": session.recording_id,
+            "recording_state": session.recording_state,
+            "connected_at": session.connected_at.isoformat() if session.connected_at else None,
+            "disconnected_at": session.disconnected_at.isoformat() if session.disconnected_at else None,
+            "media_streaming_active": session.media_streaming_active,
+            "recording_url": session.recording_url,
+            "call_duration_seconds": (
+                (session.disconnected_at - session.connected_at).total_seconds()
+                if session.connected_at and session.disconnected_at
+                else None
+            ),
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Error getting call session: %s", exc, exc_info=True)
+        raise HTTPException(500, str(exc)) from exc
+
+
+@router.post("/call/sessions/cleanup")
+async def cleanup_old_sessions(max_age_hours: int = 24):
+    """Clean up old inactive call sessions."""
+    try:
+        removed_count = await acs_event_manager.cleanup_old_sessions(max_age_hours)
+        
+        return {
+            "status": "success",
+            "removed_sessions": removed_count,
+            "max_age_hours": max_age_hours,
+        }
+        
+    except Exception as exc:
+        logger.error("Error cleaning up sessions: %s", exc, exc_info=True)
+        raise HTTPException(500, str(exc)) from exc

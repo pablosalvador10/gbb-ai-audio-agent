@@ -20,12 +20,12 @@ from typing import Any, Dict, Final, Optional
 import yaml
 from fastapi import WebSocket
 
-from rtagents.RTMedAgent.backend.orchestration.gpt_flow import process_gpt_response
-from rtagents.RTMedAgent.backend.orchestration.conversation_state import (
+from rtagents.RTAgent.backend.orchestration.gpt_flow import process_gpt_response
+from rtagents.RTAgent.backend.orchestration.conversation_state import (
     ConversationManager,
 )
-from rtagents.RTMedAgent.backend.agents.prompt_store.prompt_manager import PromptManager
-from rtagents.RTMedAgent.backend.agents.tool_store import tools as tool_store
+from rtagents.RTAgent.backend.agents.prompt_store.prompt_manager import PromptManager
+from rtagents.RTAgent.backend.agents.tool_store import tools as tool_store
 from utils.ml_logging import get_logger
 
 logger = get_logger("rt_agent")

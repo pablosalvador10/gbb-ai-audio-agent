@@ -1,6 +1,0 @@
-{
-  "dependencies": {
-    "prop-types": "^15.8.1",
-    "reactflow": "^11.11.4"
-  }
-}

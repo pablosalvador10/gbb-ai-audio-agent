@@ -6,7 +6,7 @@ implements in `src.redis.*`. Keeping them here isolates the rest of
 the app from the direct SDK dependency.
 """
 
-from src.redis.manager import AzureRedisManager
+from src.redis.async_manager import AsyncAzureRedisManager as AzureRedisManager
 
 __all__ = [
     "AzureRedisManager",

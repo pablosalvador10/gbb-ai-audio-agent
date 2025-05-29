@@ -12,20 +12,20 @@ from azure.cognitiveservices.speech.audio import AudioStreamFormat, PushAudioInp
 
 from src.speech.text_to_speech import SpeechSynthesizer
 from src.speech.speech_to_text import SpeechCoreTranslator
-from rtagents.RTMedAgent.backend.services.acs.acs_helpers import (
+from rtagents.RTAgent.backend.services.acs.acs_helpers import (
     broadcast_message,
     initialize_acs_caller_instance,
     send_pcm_frames,
 )
-from rtagents.RTMedAgent.backend.memory.conversation_state import ConversationManager
-from rtagents.RTMedAgent.backend.helpers import add_space, check_for_stopwords
-from rtagents.RTMedAgent.backend.settings import ACS_WEBSOCKET_PATH, TTS_END
-from rtagents.RTMedAgent.backend.tools_helper import (
+from rtagents.RTAgent.backend.memory.conversation_state import ConversationManager
+from rtagents.RTAgent.backend.helpers import add_space, check_for_stopwords
+from rtagents.RTAgent.backend.settings import ACS_WEBSOCKET_PATH, TTS_END
+from rtagents.RTAgent.backend.tools_helper import (
     function_mapping,
     push_tool_start,
     push_tool_end,
 )
-from rtagents.RTMedAgent.backend.tools import available_tools
+from rtagents.RTAgent.backend.tools import available_tools
 
 az_openai = AzureOpenAI(
     api_version="2025-02-01-preview",

@@ -8,7 +8,7 @@ initialise it once during startup and any router import it later.
 
 from __future__ import annotations
 from typing import Optional
-from rtagents.RTMedAgent.backend.settings import (
+from rtagents.RTAgent.backend.settings import (
     ACS_CONNECTION_STRING,
     ACS_SOURCE_PHONE_NUMBER,
     BASE_URL,
@@ -16,7 +16,7 @@ from rtagents.RTMedAgent.backend.settings import (
     ACS_WEBSOCKET_PATH,
 )
 from utils.ml_logging import get_logger
-from rtagents.RTMedAgent.backend.services.acs.acs_helpers import construct_websocket_url
+from rtagents.RTAgent.backend.services.acs.acs_helpers import construct_websocket_url
 from src.acs.acs_helper import AcsCaller
 
 logger = get_logger("services.acs_caller")

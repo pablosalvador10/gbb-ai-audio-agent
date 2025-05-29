@@ -41,3 +41,8 @@ streamlit-chat==0.1.1
 
 # ACS
 azure-communication-callautomation==1.4.0b1
+
+# Redis
+azure-mgmt-redis==14.5.0
+aioredis==2.0.1 # async redis client
+redis==6.1.0

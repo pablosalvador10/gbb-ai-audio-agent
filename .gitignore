@@ -179,9 +179,4 @@ records/
 
 .DS_Store
 
-# SSL/TLS certificates and keys
 .ssl/
-*.key
-*.pem
-*.crt
-*.cer

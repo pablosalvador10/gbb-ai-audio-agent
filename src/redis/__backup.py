@@ -1,11 +1,11 @@
-import os
-import redis
 from typing import Optional, Dict, Any, List
+import os
+import redis.asyncio as redis
 from utils.ml_logging import get_logger
 
 class AzureRedisManager:
     """
-    AzureRedisManager provides a simplified interface to connect, store,
+    AzureRedisManager provides a simplified async interface to connect, store,
     retrieve, and manage session data using Azure Cache for Redis.
     """
 
@@ -20,20 +20,10 @@ class AzureRedisManager:
         user_name: Optional[str] = None,
         scope: Optional[str] = None,
     ):
-        """
-        Initialize the Redis connection.
-
-        Args:
-            host (str, optional): The Redis host name. If not provided, uses REDIS_HOST env variable.
-            access_key (str, optional): The Redis access key. If not provided, uses DefaultAzureCredential.
-            port (int): Redis port, default is 6380.
-            db (int): Redis database index.
-            ssl (bool): Use SSL for the connection.
-        """
-        self.logger = get_logger()
-        self.host = host or os.getenv("REDIS_HOST")
+        self.logger = get_logger(__name__)
+        self.host = host or os.getenv("REDIS_ENDPOINT")
         self.access_key = access_key or os.getenv("REDIS_ACCESS_KEY")
-        self.port = port or os.getenv("REDIS_PORT")
+        self.port = port
         self.db = db
         self.ssl = ssl
 
@@ -76,38 +66,37 @@ class AzureRedisManager:
 
     async def ping(self) -> bool:
         """Check Redis connectivity."""
-        return self.redis_client.ping()
+        return await self.redis_client.ping()
 
-    def set_value(self, key: str, value: str) -> bool:
+    async def set_value(self, key: str, value: str) -> bool:
         """Set a string value in Redis."""
-        return self.redis_client.set(key, value)
+        return await self.redis_client.set(key, value)
 
-    def get_value(self, key: str) -> Optional[str]:
+    async def get_value(self, key: str) -> Optional[str]:
         """Get a string value from Redis."""
-        value = self.redis_client.get(key)
-        return value.decode() if value else None
+        value = await self.redis_client.get(key)
+        return value if value else None
 
-    def store_session_data(self, session_id: str, data: Dict[str, Any]) -> bool:
-        """Store session data using a Redis hash."""
-        return self.redis_client.hset(session_id, mapping=data)
+    async def store_data(self, session_id: str, data: Dict[str, Any], ttl_seconds: Optional[int] = None) -> bool:
+        """Store session data using a Redis hash. Optionally set TTL (in seconds)."""
+        result = await self.redis_client.hset(session_id, mapping=data)
+        if ttl_seconds is not None:
+            await self.redis_client.expire(session_id, ttl_seconds)
+        return result
 
-    def get_session_data(self, session_id: str) -> Dict[str, str]:
+    async def get_data(self, session_id: str) -> Dict[str, str]:
         """Retrieve all session data for a given session ID."""
-        return {
-            k.decode(): v.decode()
-            for k, v in self.redis_client.hgetall(session_id).items()
-        }
+        data = await self.redis_client.hgetall(session_id)
+        return {k: v for k, v in data.items()}
 
-    def update_session_field(self, session_id: str, field: str, value: str) -> bool:
+    async def update_session_field(self, session_id: str, field: str, value: str) -> bool:
         """Update a single field in the session hash."""
-        return self.redis_client.hset(session_id, field, value)
+        return await self.redis_client.hset(session_id, field, value)
 
-    def delete_session(self, session_id: str) -> int:
+    async def delete_session(self, session_id: str) -> int:
         """Delete a session from Redis."""
-        return self.redis_client.delete(session_id)
+        return await self.redis_client.delete(session_id)
 
-    def list_connected_clients(self) -> List[Dict[str, str]]:
+    async def list_connected_clients(self) -> List[Dict[str, str]]:
         """List currently connected clients."""
-        return self.redis_client.client_list()
-
-
+        return await self.redis_client.client_list()

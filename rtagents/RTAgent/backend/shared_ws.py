@@ -15,9 +15,9 @@ import asyncio
 import json
 from fastapi import WebSocket
 
-from rtagents.RTMedAgent.backend.services.speech_services import SpeechSynthesizer
-from rtagents.RTMedAgent.backend.latency.latency_tool import LatencyTool
-from rtagents.RTMedAgent.backend.services.acs.acs_helpers import (
+from rtagents.RTAgent.backend.services.speech_services import SpeechSynthesizer
+from rtagents.RTAgent.backend.latency.latency_tool import LatencyTool
+from rtagents.RTAgent.backend.services.acs.acs_helpers import (
     broadcast_message,
     send_pcm_frames,
 )
@@ -38,7 +38,7 @@ async def send_tts_audio(
     synth: SpeechSynthesizer = ws.app.state.tts_client
     synth.start_speaking_text(text)
     if latency_tool:
-        latency_tool.stop("tts", ws.app.state.redis)
+        await latency_tool.stop("tts", ws.app.state.redis)
 
 
 async def send_response_to_acs(
@@ -62,23 +62,23 @@ async def send_response_to_acs(
     if blocking:
         await coro
         if latency_tool:
-            latency_tool.stop("tts", ws.app.state.redis)
+            await latency_tool.stop("tts", ws.app.state.redis)
         return None
 
     if not hasattr(ws.app.state, "tts_tasks"):
-        ws.app.state.tts_tasks: Set[asyncio.Task] = set()
+        ws.app.state.tts_tasks = set()
 
     task = asyncio.create_task(coro)
     ws.app.state.tts_tasks.add(task)
 
-    async def stop_latency(_):
-        if latency_tool:
-            latency_tool.stop("tts", ws.app.state.redis)
-        ws.app.state.tts_tasks.discard(task)
-
+    def stop_latency(task):
+        async def _stop():
+            if latency_tool:
+                await latency_tool.stop("tts", ws.app.state.redis)
+            ws.app.state.tts_tasks.discard(task)
+        asyncio.create_task(_stop())
     task.add_done_callback(stop_latency)
     return task
-
 
 async def push_final(
     ws: WebSocket,

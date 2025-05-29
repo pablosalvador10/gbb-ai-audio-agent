@@ -13,24 +13,24 @@ import asyncio, json, time, uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi import WebSocket
-from rtagents.RTMedAgent.backend.services.openai_services import (
+from rtagents.RTAgent.backend.services.openai_services import (
     client as az_openai_client,
 )
 from utils.ml_logging import get_logger
-from rtagents.RTMedAgent.backend.settings import (
+from rtagents.RTAgent.backend.settings import (
     AZURE_OPENAI_CHAT_DEPLOYMENT_ID,
     TTS_END,
 )
-from rtagents.RTMedAgent.backend.helpers import add_space
-from rtagents.RTMedAgent.backend.agents.tool_store.tools import (
+from rtagents.RTAgent.backend.helpers import add_space
+from rtagents.RTAgent.backend.agents.tool_store.tools import (
     available_tools as DEFAULT_TOOLS,
 )
-from rtagents.RTMedAgent.backend.agents.tool_store.tools_helper import (
+from rtagents.RTAgent.backend.agents.tool_store.tools_helper import (
     function_mapping,
     push_tool_start,
     push_tool_end,
 )
-from rtagents.RTMedAgent.backend.shared_ws import (
+from rtagents.RTAgent.backend.shared_ws import (
     send_tts_audio,
     push_final,
     broadcast_message,

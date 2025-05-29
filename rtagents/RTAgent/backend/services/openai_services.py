@@ -7,7 +7,7 @@ import-time.
 """
 
 from openai import AzureOpenAI
-from rtagents.RTMedAgent.backend.settings import (
+from rtagents.RTAgent.backend.settings import (
     AZURE_OPENAI_ENDPOINT,
     AZURE_OPENAI_KEY,
 )
