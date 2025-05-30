@@ -17,7 +17,7 @@ class LatencyTool:
         """Mark the beginning of *stage*."""
         self._inflight[stage] = time.perf_counter()
 
-    async def stop(self, stage: str, redis_mgr) -> None:
+    async def stop(self, stage: str) -> None:
         """
         Mark the end of *stage* and immediately push the sample
         into Redis for real-time monitoring.
@@ -30,8 +30,8 @@ class LatencyTool:
             return
 
         end = time.perf_counter()
-        self.cm.note_latency(stage, start, end)
-        await self.cm.persist_to_redis(redis_mgr)
+        await self.cm.note_latency(stage, start, end)
+        await self.cm.persist_to_redis()
         logger.info("[LatencyTool] %s latency: %.3f s", stage, end - start)
 
     # convenience – fetch already-summarised numbers

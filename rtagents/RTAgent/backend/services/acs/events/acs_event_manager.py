@@ -19,6 +19,11 @@ from azure.core.exceptions import HttpResponseError
 from azure.core.messaging import CloudEvent
 from fastapi import Request, WebSocket
 from pydantic import BaseModel
+from rtagents.RTAgent.backend.orchestration.conversation_state import (
+    ConversationManager,
+)
+from src.redis.async_manager import AsyncAzureRedisManager
+
 
 from utils.ml_logging import get_logger
 
@@ -28,13 +33,14 @@ logger = get_logger("services.acs.events.manager")
 class ACSEventType(str, Enum):
     """ACS Event types that we handle."""
     CALL_CONNECTED = "Microsoft.Communication.CallConnected"
-    CALL_DISCONNECTED = "Microsoft.Communication.CallDisconnected" 
+    CALL_DISCONNECTED = "Microsoft.Communication.CallDisconnected"
     MEDIA_STREAMING_STARTED = "Microsoft.Communication.MediaStreamingStarted"
     MEDIA_STREAMING_STOPPED = "Microsoft.Communication.MediaStreamingStopped"
     RECORDING_STATE_CHANGED = "Microsoft.Communication.RecordingStateChanged"
     PLAY_COMPLETED = "Microsoft.Communication.PlayCompleted"
     PLAY_FAILED = "Microsoft.Communication.PlayFailed"
     PLAY_CANCELED = "Microsoft.Communication.PlayCanceled"
+    PARTICIPANTS_UPDATED = "Microsoft.Communication.ParticipantsUpdated"
 
 
 class RecordingConfig(BaseModel):
@@ -47,34 +53,33 @@ class RecordingConfig(BaseModel):
     enable_transcription: bool = False
 
 
-class CallSession(BaseModel):
-    """Represents an active call session with recording state."""
-    call_connection_id: str
-    server_call_id: Optional[str] = None
-    participant_raw_id: Optional[str] = None
-    recording_id: Optional[str] = None
-    recording_state: Optional[str] = None
-    connected_at: Optional[datetime] = None
-    disconnected_at: Optional[datetime] = None
-    media_streaming_active: bool = False
-    recording_url: Optional[str] = None
+# CallSession functionality has been consolidated into ConversationManager
+# All call-specific state is now stored in ConversationManager's context
 
+from typing import List, Dict, Any
+from rtagents.RTAgent.backend.services.acs.acs_call_service import ACSCallService
 
 class ACSEventManager:
-    """
-    Centralized manager for ACS call events with recording capabilities.
-    
-    Features:
-    - Event routing to specific handlers
-    - Automatic recording start/stop
-    - Session state management
-    - Error handling and logging
-    - Integration with existing ACS router
-    """
-    
-    def __init__(self, recording_config: Optional[RecordingConfig] = None):
+    def __init__(
+            self, 
+            call_id: str,
+            recording_config: Optional[RecordingConfig] = None, 
+            call_service: Optional[ACSCallService] = None,
+            app_state: Optional[Any] = None,
+            conversation_manager: Optional[ConversationManager] = None,
+            redis_mgr: Optional[AsyncAzureRedisManager] = None
+        ):
+        self.call_id = call_id
+        self.call_service = call_service
+
         self.recording_config = recording_config or RecordingConfig()
-        self.active_sessions: Dict[str, CallSession] = {}
+        self.app_state = app_state
+
+        # Use specialized session manager instead of raw ConversationManager
+        self.conversation_manager = conversation_manager or ConversationManager(session_id=call_id)
+        self.redis_mgr = redis_mgr or AsyncAzureRedisManager()
+
+        # Define event handlers mapping
         self.event_handlers: Dict[ACSEventType, Callable] = {
             ACSEventType.CALL_CONNECTED: self._handle_call_connected,
             ACSEventType.CALL_DISCONNECTED: self._handle_call_disconnected,
@@ -84,158 +89,249 @@ class ACSEventManager:
             ACSEventType.PLAY_COMPLETED: self._handle_play_completed,
             ACSEventType.PLAY_FAILED: self._handle_play_failed,
             ACSEventType.PLAY_CANCELED: self._handle_play_canceled,
+            ACSEventType.PARTICIPANTS_UPDATED: self._handle_participants_updated,
         }
-        
-    async def process_callback_events(self, request: Request, events: list) -> Dict[str, Any]:
-        """
-        Process incoming ACS callback events.
-        
-        Args:
-            request: FastAPI request object with app state
-            events: List of raw event data from ACS
+
+
             
-        Returns:
-            Dictionary with processing results
+    async def process_callback_events(self, call_connection_id: str, events: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
-        correlation_id = str(uuid.uuid4())
-        processed_events = []
-        errors = []
+        Process ACS callback events using the enhanced session manager
+        Following Azure Well-Architected Framework patterns for reliability
+        """
+        if not events:
+            logger.warning("⚠️ No events provided for processing")
+            return {"success": False, "error": "No events provided"}
+        
+        results = []
+        correlation_id = events[0].get("correlation_id", "unknown")
         
         try:
-            for raw_event in events:
-                try:
-                    # Parse cloud event
-                    event = CloudEvent.from_dict(raw_event)
-                    event_type = ACSEventType(event.type)
-                    
-                    # Extract common event data
-                    call_connection_id = event.data.get("callConnectionId")
-                    server_call_id = event.data.get("serverCallId")
-                    
-                    # Log event with emoji for visual identification
-                    emoji = self._get_event_emoji(event_type)
-                    logger.info(
-                        f"{emoji} Processing ACS event: {event_type.value}",
-                        extra={
-                            "event_type": event_type.value,
-                            "call_connection_id": call_connection_id,
-                            "server_call_id": server_call_id,
-                            "correlation_id": correlation_id,
-                        }
-                    )
-                    
-                    # Route to specific handler
-                    if event_type in self.event_handlers:
-                        result = await self.event_handlers[event_type](
-                            request=request,
-                            event=event,
-                            correlation_id=correlation_id,
-                        )
-                        processed_events.append({
-                            "event_type": event_type.value,
-                            "call_connection_id": call_connection_id,
-                            "result": result,
-                        })
-                    else:
-                        logger.warning(
-                            f"No handler for event type: {event_type.value}",
-                            extra={"correlation_id": correlation_id}
-                        )
-                        
-                except ValueError:
-                    # Unknown event type
-                    logger.warning(
-                        f"Unknown ACS event type: {event.type}",
-                        extra={"correlation_id": correlation_id}
-                    )
-                except Exception as e:
-                    error_msg = f"Error processing event: {str(e)}"
-                    logger.error(error_msg, exc_info=True, extra={"correlation_id": correlation_id})
-                    errors.append(error_msg)
-                    
-            return {
-                "status": "processed",
-                "correlation_id": correlation_id,
-                "processed_events": processed_events,
-                "errors": errors,
-            }
-            
-        except Exception as e:
-            logger.error(f"Failed to process callback events: {str(e)}", exc_info=True)
-            return {
-                "status": "error",
-                "correlation_id": correlation_id,
-                "error": str(e),
-            }
-            
-    async def _handle_call_connected(
-        self,
-        request: Request,
-        event: CloudEvent,
-        correlation_id: str,
-    ) -> Dict[str, Any]:
-        """Handle call connected event and start recording if configured."""
-        
-        call_connection_id = event.data.get("callConnectionId")
-        server_call_id = event.data.get("serverCallId")
-        
-        try:
-            # Create or update call session
-            session = self.active_sessions.get(call_connection_id)
-            if not session:
-                session = CallSession(
-                    call_connection_id=call_connection_id,
-                    server_call_id=server_call_id,
-                    connected_at=datetime.now(timezone.utc),
-                )
-                self.active_sessions[call_connection_id] = session
-            else:
-                session.connected_at = datetime.now(timezone.utc)
-                if server_call_id:
-                    session.server_call_id = server_call_id
-                    
-            # Extract participant information
-            if "participant" in event.data:
-                participant_data = event.data["participant"]
-                session.participant_raw_id = participant_data.get("rawId")
+            for event in events:
+                event_type = event.get("type", "unknown")
+                call_connection_id = event.get("call_connection_id")
                 
-            logger.info(
-                "Call connected successfully",
-                extra={
+                # Route to appropriate handler based on event type
+                if event_type == "Microsoft.Communication.CallConnected":
+                    result = await self._handle_call_connected(event)
+                elif event_type == "Microsoft.Communication.CallDisconnected":
+                    result = await self._handle_call_disconnected(event)
+                elif event_type == "Microsoft.Communication.ParticipantsUpdated":
+                    result = await self._handle_participants_updated(event)
+                elif event_type == "Microsoft.Communication.MediaStreamingStarted":
+                    result = await self._handle_media_streaming_started(event)
+                elif event_type == "Microsoft.Communication.MediaStreamingStopped":
+                    result = await self._handle_media_streaming_stopped(event)
+                elif event_type == "Microsoft.Communication.RecordingStateChanged":
+                    result = await self._handle_recording_state_changed(event)
+                else:
+                    logger.warning(f"🔍 Unhandled event type: {event_type}")
+                    result = {
+                        "success": True,
+                        "message": f"Event type {event_type} acknowledged but not processed",
+                        "event_type": event_type
+                    }
+                
+                # Add event metadata to result
+                result.update({
+                    "event_type": event_type,
                     "call_connection_id": call_connection_id,
-                    "server_call_id": server_call_id,
-                    "participant_raw_id": session.participant_raw_id,
-                    "correlation_id": correlation_id,
+                    "correlation_id": correlation_id
+                })
+                
+                results.append(result)
+            
+            # Calculate overall success
+            successful_events = sum(1 for r in results if r.get("success", False))
+            total_events = len(results)
+            
+            logger.info(
+                f"📊 Processed {successful_events}/{total_events} events successfully",
+                extra={
+                    "successful_events": successful_events,
+                    "total_events": total_events,
+                    "correlation_id": correlation_id
                 }
             )
             
-            # Start recording if auto-start is enabled
-            recording_result = None
-            if self.recording_config.auto_start_on_connect:
-                recording_result = await self._start_call_recording(
-                    request=request,
-                    session=session,
-                    correlation_id=correlation_id,
-                )
-                
             return {
-                "status": "success",
-                "session_created": True,
-                "recording_started": recording_result is not None,
-                "recording_id": recording_result.get("recording_id") if recording_result else None,
+                "success": successful_events == total_events,
+                "processed_events": successful_events,
+                "total_events": total_events,
+                "results": results,
+                "correlation_id": correlation_id
             }
             
         except Exception as e:
             logger.error(
-                f"Error handling call connected: {str(e)}",
+                f"❌ Critical error in event processing batch",
+                extra={
+                    "correlation_id": correlation_id,
+                    "error": str(e)
+                },
+                exc_info=True
+            )
+            
+            return {
+                "success": False,
+                "error": str(e),
+                "correlation_id": correlation_id,
+                "results": results  # Return partial results if any were processed
+            }
+
+    async def _handle_participants_updated(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle participants updated event using specialized session manager"""
+        event_data = event.get("data", {})
+        participants = event_data.get("participants", [])
+        # call_connection_id = event_data.get("callConnectionId")
+        call_connection_id = event_data.get("callConnectionId") or event_data.get("call_connection_id")
+        if not call_connection_id:
+            logger.error("❌ No call_connection_id in participants updated event")
+            return {"success": False, "error": "Missing call_connection_id"}
+
+        try:
+            # Extract participants from event data
+            participants = event_data.get("participants", [])
+
+            if not participants:
+                logger.warning(f"⚠️ No participants in event for call {call_connection_id}")
+                return {"success": True, "participants_count": 0}
+
+            # Update participants using specialized method
+            success = await self.session_manager.update_participants(
+                call_connection_id=call_connection_id,
+                participants=participants,
+                metadata={"event_type": "participants_updated", "source": "acs_event"}
+            )
+            
+            if success:
+                return {
+                    "success": True,
+                    "participants_count": len(participants),
+                    "participants_updated": True
+                }
+            else:
+                return {"success": False, "error": "Failed to update participants"}
+                
+        except Exception as e:
+            logger.error(f"❌ Error handling participants updated: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def _initiate_call_recording(
+        self, 
+        call_connection_id: str, 
+        participants: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Initiate call recording using the specialized session manager and helpers
+        Following Azure security and compliance patterns
+        """
+        try:
+            from ..acs_helpers import initiate_acs_call_recording
+            
+            # Use the enhanced helper function with session manager
+            recording_result = await initiate_acs_call_recording(
+                call_connection_id=call_connection_id,
+                participants=participants,
+                app_state=self.app_state
+            )
+            
+            if recording_result.get("success"):
+                # Update recording state using session manager
+                await self.session_manager.update_recording_state(
+                    call_connection_id=call_connection_id,
+                    recording_id=recording_result.get("recording_id"),
+                    state="started",
+                    metadata={
+                        "participants_count": len(participants),
+                        "auto_initiated": True,
+                        "storage_account": recording_result.get("storage_account")
+                    }
+                )
+                
+                logger.info(
+                    f"✅ Recording initiated successfully: {recording_result.get('recording_id')}",
+                    extra={
+                        "call_connection_id": call_connection_id,
+                        "recording_id": recording_result.get("recording_id"),
+                        "participants_count": len(participants)
+                    }
+                )
+                
+                return {
+                    "recording_initiated": True,
+                    "recording_id": recording_result.get("recording_id"),
+                    "participants_count": len(participants)
+                }
+            else:
+                logger.error(
+                    f"❌ Recording initiation failed: {recording_result.get('error')}",
+                    extra={
+                        "call_connection_id": call_connection_id,
+                        "error": recording_result.get("error")
+                    }
+                )
+                
+                return {
+                    "recording_initiated": False,
+                    "error": recording_result.get("error")
+                }
+                
+        except Exception as e:
+            logger.error(
+                f"❌ Exception during recording initiation: {e}",
                 extra={
                     "call_connection_id": call_connection_id,
-                    "correlation_id": correlation_id,
+                    "error": str(e)
                 },
-                exc_info=True,
+                exc_info=True
             )
-            return {"status": "error", "error": str(e)}
             
+            return {
+                "recording_initiated": False,
+                "error": str(e)
+            }  
+
+    async def _handle_call_connected(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle call connected event using specialized session manager"""
+        # Capture participants from event data
+        event_data = event.get("data", {})
+        participants = event_data.get("participants", [])
+        call_connection_id = event_data.get("callConnectionId")
+        if not call_connection_id:
+            logger.error("❌ No call_connection_id in call connected event")
+            return {"success": False, "error": "Missing call_connection_id"}
+
+        try:
+            # Set correlation ID for tracing
+
+            
+            if not participants:
+                # Fallback: single participant format
+                single_participant = event_data.get("participant")
+                if single_participant:
+                    participants = [single_participant]
+            
+
+            # Initiate recording if configured
+            recording_result = {"recording_initiated": False}
+            if self.recording_config.auto_start_on_connect:
+                recording_result = await self._initiate_call_recording(
+                    call_connection_id, participants
+                )
+            
+            logger.info(f"✅ Call connected successfully: {call_connection_id}")
+            return {
+                "success": True,
+                "call_connection_id": call_connection_id,
+                "participants_captured": len(participants),
+                **recording_result
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Error handling call connected: {e}")
+            return {"success": False, "error": str(e)}
+
     async def _handle_call_disconnected(
         self,
         request: Request,
@@ -711,3 +807,4 @@ class ACSEventManager:
             logger.info(f"Cleaned up {removed_count} old call sessions")
             
         return removed_count
+            

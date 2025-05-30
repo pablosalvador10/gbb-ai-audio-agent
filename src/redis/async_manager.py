@@ -1,5 +1,5 @@
 from typing import Optional, Dict, Any, List
-import os
+import os, json
 import redis.asyncio as redis
 from utils.ml_logging import get_logger
 
@@ -13,14 +13,14 @@ class AsyncAzureRedisManager:
         self,
         host: Optional[str] = None,
         access_key: Optional[str] = None,
-        port: int = 6380,
+        port: int = None,
         ssl: bool = True,
         credential: Optional[object] = None,  # For DefaultAzureCredential
         user_name: Optional[str] = None,
         scope: Optional[str] = None,
     ):
         self.logger = get_logger(__name__)
-        self.host = host or os.getenv("REDIS_ENDPOINT")
+        self.host = host or os.getenv("REDIS_HOST")
         self.access_key = access_key or os.getenv("REDIS_ACCESS_KEY")
         self.port = port or os.getenv("REDIS_PORT")
         self.ssl = ssl

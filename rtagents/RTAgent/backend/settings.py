@@ -34,6 +34,7 @@ BASE_URL: str = os.getenv("BASE_URL", "")
 
 # API route fragments (keep them in one place so routers can import)
 ACS_CALL_PATH = "/api/call"
+ACS_RECORDING_CALLBACK_PATH: str = "/call/recording/callbacks"
 ACS_CALLBACK_PATH: str = "/call/callbacks"
 ACS_WEBSOCKET_PATH: str = "/call/stream"
 
@@ -41,6 +42,13 @@ ACS_WEBSOCKET_PATH: str = "/call/stream"
 AZURE_COSMOS_CONNECTION_STRING: str = os.getenv("AZURE_COSMOS_CONNECTION_STRING", "")
 AZURE_COSMOS_DB_DATABASE_NAME: str = os.getenv("AZURE_COSMOS_DB_DATABASE_NAME", "")
 AZURE_COSMOS_DB_COLLECTION_NAME: str = os.getenv("AZURE_COSMOS_DB_COLLECTION_NAME", "")
+
+# Blob Storage for Recording
+AZURE_STORAGE_ACCOUNT_NAME: str = os.getenv("AZURE_STORAGE_ACCOUNT_NAME")
+AZURE_STORAGE_RECORDING_CONTAINER_NAME: str = os.getenv("AZURE_STORAGE_RECORDING_CONTAINER_NAME", "recordings")
+
+# Event Grid Publisher
+EVENTGRID_ENDPOINT: str = os.getenv("EVENTGRID_ENDPOINT", "")
 
 # ------------------------------------------------------------------------------
 # SST behaviour

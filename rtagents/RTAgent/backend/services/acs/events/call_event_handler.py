@@ -126,7 +126,7 @@ class CallEventHandler(BaseEventHandler):
         
         # Initialize conversation state for this call
         try:
-            conversation_manager = ConversationManager()
+            conversation_manager = request.app.state.conversation_manager
             await conversation_manager.initialize_conversation(
                 call_connection_id, 
                 correlation_id
@@ -234,7 +234,7 @@ class CallEventHandler(BaseEventHandler):
         
         # Cleanup conversation state
         try:
-            conversation_manager = ConversationManager()
+            conversation_manager = request.app.state.conversation_manager
             await conversation_manager.cleanup_conversation(call_connection_id)
         except Exception as e:
             self.logger.error(
@@ -385,7 +385,7 @@ class CallEventHandler(BaseEventHandler):
                 self._active_calls[call_connection_id]["failed_at"] = datetime.now(timezone.utc)
                 
                 # Cleanup conversation state
-                conversation_manager = ConversationManager()
+                conversation_manager = request.app.state.conversation_manager
                 await conversation_manager.cleanup_conversation(call_connection_id)
                 
                 self.logger.info(

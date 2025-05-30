@@ -32,6 +32,11 @@ from rtagents.RTAgent.backend.settings import (
     VAD_THRESHOLD,
     PREFIX_PADDING_MS,
     SILENCE_DURATION_MS,
+    ACS_CONNECTION_STRING,
+    ACS_SOURCE_PHONE_NUMBER,
+    BASE_URL,
+    ACS_CALLBACK_PATH,
+    ACS_WEBSOCKET_PATH,
 )
 
 # Import services with error handling
@@ -41,6 +46,7 @@ try:
         SpeechCoreTranslator,
         CosmosDBMongoCoreManager,
         AzureRedisManager,
+        EventGridPublisherService
     )
 except ImportError:
     # Fallback imports for development
@@ -51,18 +57,25 @@ except ImportError:
         AzureRedisManager,
     )
 
-from rtagents.RTAgent.backend.services.acs.acs_caller import (
-    initialize_acs_caller_instance,
+from rtagents.RTAgent.backend.orchestration.conversation_state import ConversationManager
+from rtagents.RTAgent.backend.services.acs.acs_call_service import (
+    ACSCallService,
 )
 from rtagents.RTAgent.backend.agents.base import RTAgent
+from rtagents.RTAgent.backend.latency.latency_tool import LatencyTool
 
 logger = get_logger("lifespan")
 
 
 async def initialize_azure_services(app: FastAPI) -> None:
     """
-    Initialize all Azure services following Azure best practices
-    
+    Initialize all Azure services following Azure best practices.
+    This function sets up various Azure services required for the application, including Speech Services, Redis, 
+    Conversation Manager, Event Grid, Cosmos DB, Azure OpenAI STT configuration, ACS Caller, and RT Agents. 
+    It ensures proper initialization and handles errors gracefully, marking the health status of each service.
+    Note:
+        Redis should be interacted with through ConversationManager for session state management.
+        app (FastAPI): FastAPI application instance.    
     Args:
         app: FastAPI application instance
         
@@ -84,30 +97,40 @@ async def initialize_azure_services(app: FastAPI) -> None:
         app.state.service_health['speech'] = 'healthy'
         logger.info("✅ Speech services initialized successfully")
     except Exception as e:
-        logger.error(f"❌ Failed to initialize Speech services: {e}")
+        logger.error("❌ [Speech Services] Initialization failed: %s", e)
         app.state.service_health['speech'] = 'failed'
-        raise RuntimeError(f"Critical service failure - Speech services: {e}")
-    
-    # Redis connection with retry logic
+        raise RuntimeError("Critical service failure - Speech services")
+
     try:
-        logger.info("🔴 Initializing Redis connection...")
+        logger.info("🔴 Initializing Redis and session managers...")
         app.state.redis = AzureRedisManager()
-        
-        # Test Redis connection
+        app.state.conversation_manager = await ConversationManager.from_redis(
+            session_id="default_session",
+            redis_mgr=app.state.redis
+        )
+
         if hasattr(app.state.redis, 'ping'):
-            ping_result = app.state.redis.ping()
+            ping_result = await app.state.redis.ping()
             if not ping_result:
                 raise ConnectionError("Redis ping failed")
-        
+
         app.state.service_health['redis'] = 'healthy'
-        logger.info("✅ Redis connection established successfully")
     except Exception as e:
-        logger.error(f"❌ Failed to initialize Redis: {e}")
+        logger.error("❌ [Redis] Initialization failed: %s", e)
         app.state.service_health['redis'] = 'failed'
-        # Redis failure is critical for session management
-        raise RuntimeError(f"Critical service failure - Redis: {e}")
-    
-    # Cosmos DB connection with retry logic
+        raise RuntimeError("Critical service failure - Redis")
+
+    try:
+        logger.info("📡 Initializing Event Grid...")
+        app.state.eventgrid = EventGridPublisherService.from_env()
+        app.state.eventgrid.test_connection()
+        app.state.service_health['eventgrid'] = 'healthy'
+        logger.info("✅ Event Grid initialized successfully")
+    except Exception as e:
+        logger.error("❌ [Event Grid] Initialization failed: %s", e)
+        app.state.service_health['eventgrid'] = 'failed'
+        logger.warning("⚠️ Continuing without Event Grid - some features may be limited")
+
     try:
         logger.info("🌌 Initializing Cosmos DB connection...")
         app.state.cosmos = CosmosDBMongoCoreManager(
@@ -115,103 +138,92 @@ async def initialize_azure_services(app: FastAPI) -> None:
             database_name=AZURE_COSMOS_DB_DATABASE_NAME,
             collection_name=AZURE_COSMOS_DB_COLLECTION_NAME,
         )
-        
-        # Test Cosmos DB connection
-        test_query = {"_id": "test_connection"}
-        if app.state.cosmos.document_exists(test_query):
-            logger.info("✅ Cosmos DB connection test passed")
-        else:
-            logger.warning("⚠️ Cosmos DB connection test failed - no test document found")
-        
+
+        # test_query = {"_id": "test_connection"}
+        # if app.state.cosmos.document_exists(test_query):
+        #     logger.info("✅ Cosmos DB connection test passed")
+        # else:
+        #     logger.warning("⚠️ Cosmos DB connection test failed - no test document found")
+
         app.state.service_health['cosmos'] = 'healthy'
         logger.info("✅ Cosmos DB connection established successfully")
     except Exception as e:
-        logger.error(f"❌ Failed to initialize Cosmos DB: {e}")
+        logger.error("❌ [Cosmos DB] Initialization failed: %s", e)
         app.state.service_health['cosmos'] = 'failed'
-        # Continue without Cosmos DB for now - can be non-critical
         logger.warning("⚠️ Continuing without Cosmos DB - some features may be limited")
-    
-    # Azure OpenAI STT configuration
+
     try:
         logger.info("🤖 Setting up Azure OpenAI STT configuration...")
         app.state.aoai_stt_cfg = {
-            "url": f"{AOAI_STT_ENDPOINT.replace('https','wss')}"
-            "/openai/realtime?api-version=2025-04-01-preview&intent=transcription",
+            "url": f"{AOAI_STT_ENDPOINT.replace('https', 'wss')}/openai/realtime?api-version=2025-04-01-preview&intent=transcription",
             "headers": {"api-key": AOAI_STT_KEY},
             "rate": RATE,
-            "channels": CHANNELS,  # Mono audio
-            "format_": FORMAT,  # PCM16
-            "chunk": CHUNK,  # Size of audio chunks to process
-            # VAD settings
+            "channels": CHANNELS,
+            "format_": FORMAT,
+            "chunk": CHUNK,
             "vad": {
                 "threshold": VAD_THRESHOLD,
-                # Prefix padding in milliseconds to avoid cutting off speech
                 "prefix_padding_ms": PREFIX_PADDING_MS,
-                # Silence duration in milliseconds to consider the end of speech
                 "silence_duration_ms": SILENCE_DURATION_MS,
             },
         }
         app.state.service_health['aoai_stt'] = 'healthy'
         logger.info("✅ Azure OpenAI STT configuration completed")
     except Exception as e:
-        logger.error(f"❌ Failed to configure Azure OpenAI STT: {e}")
+        logger.error("❌ [Azure OpenAI STT] Configuration failed: %s", e)
         app.state.service_health['aoai_stt'] = 'failed'
-        # Continue without STT config - can be initialized later
-        logger.warning("⚠️ Continuing without Azure OpenAI STT config")
-    
-    # ACS Caller initialization (may be None if env vars missing)
+        logger.warning("⚠️ Continuing without Azure OpenAI STT configuration")
+
     try:
         logger.info("📞 Initializing ACS caller...")
-        app.state.acs_caller = initialize_acs_caller_instance()
-        if app.state.acs_caller is not None:
+        app.state.call_service = ACSCallService(
+            source_number=ACS_SOURCE_PHONE_NUMBER,
+            acs_connection_string=ACS_CONNECTION_STRING,
+            acs_callback_path=f"{BASE_URL.rstrip('/')}{ACS_CALLBACK_PATH}",
+            acs_media_streaming_websocket_path=f"{BASE_URL.rstrip('/')}{ACS_WEBSOCKET_PATH}",
+        )
+        if app.state.call_service is not None:
             app.state.service_health['acs'] = 'healthy'
             logger.info("✅ ACS caller initialized successfully")
         else:
             app.state.service_health['acs'] = 'not_configured'
             logger.warning("⚠️ ACS caller not configured - check environment variables")
     except Exception as e:
-        logger.error(f"❌ Failed to initialize ACS caller: {e}")
+        logger.error("❌ [ACS Caller] Initialization failed: %s", e)
         app.state.service_health['acs'] = 'failed'
-        app.state.acs_caller = None
+        app.state.call_service = None
         logger.warning("⚠️ Continuing without ACS caller")
-    
-    # RT Agent initialization
+
     try:
         logger.info("🤖 Initializing RT Agents...")
-        
-        # Auth Agent
         try:
             app.state.auth_agent = RTAgent(
-                config_path="rtagents/RTMedAgent/backend/agents/agent_store/auth_agent.yaml"
+                config_path="rtagents/RTMedAgent/backend/agents/agent_store/auth_agent.yaml",
             )
             logger.info("✅ Auth agent initialized successfully")
         except Exception as e:
-            logger.error(f"❌ Failed to initialize auth agent: {e}")
+            logger.error("❌ [Auth Agent] Initialization failed: %s", e)
             app.state.auth_agent = None
-        
-        # Task Agent
+
         try:
             app.state.task_agent = RTAgent(
-                config_path="rtagents/RTMedAgent/backend/agents/agent_store/task_agent.yaml"
+                config_path="rtagents/RTMedAgent/backend/agents/agent_store/task_agent.yaml",
             )
             logger.info("✅ Task agent initialized successfully")
         except Exception as e:
-            logger.error(f"❌ Failed to initialize task agent: {e}")
+            logger.error("❌ [Task Agent] Initialization failed: %s", e)
             app.state.task_agent = None
-        
-        # Check if at least one agent is available
+
         if app.state.auth_agent or app.state.task_agent:
             app.state.service_health['agents'] = 'healthy'
         else:
             app.state.service_health['agents'] = 'failed'
             logger.warning("⚠️ No agents available - limited functionality")
-        
     except Exception as e:
-        logger.error(f"❌ Failed to initialize RT Agents: {e}")
+        logger.error("❌ [RT Agents] Initialization failed: %s", e)
         app.state.service_health['agents'] = 'failed'
         app.state.auth_agent = None
         app.state.task_agent = None
-
 
 async def cleanup_azure_services(app: FastAPI) -> None:
     """
@@ -250,11 +262,11 @@ async def cleanup_azure_services(app: FastAPI) -> None:
         cleanup_tasks.append(cleanup_cosmos())
     
     # ACS cleanup
-    if hasattr(app.state, 'acs_caller') and app.state.acs_caller:
+    if hasattr(app.state, 'acs_caller') and app.state.call_service:
         async def cleanup_acs():
             try:
-                if hasattr(app.state.acs_caller, 'cleanup'):
-                    await app.state.acs_caller.cleanup()
+                if hasattr(app.state.call_service, 'cleanup'):
+                    await app.state.call_service.cleanup()
                 logger.info("✅ ACS caller cleaned up")
             except Exception as e:
                 logger.error(f"❌ Error cleaning up ACS caller: {e}")

@@ -15,6 +15,7 @@ import asyncio
 import json
 from fastapi import WebSocket
 
+from utils.ml_logging import get_logger
 from rtagents.RTAgent.backend.services.speech_services import SpeechSynthesizer
 from rtagents.RTAgent.backend.latency.latency_tool import LatencyTool
 from rtagents.RTAgent.backend.services.acs.acs_helpers import (
@@ -22,6 +23,8 @@ from rtagents.RTAgent.backend.services.acs.acs_helpers import (
     send_pcm_frames,
 )
 from typing import Optional, Set
+
+logger = get_logger()
 
 
 async def send_tts_audio(
@@ -38,14 +41,13 @@ async def send_tts_audio(
     synth: SpeechSynthesizer = ws.app.state.tts_client
     synth.start_speaking_text(text)
     if latency_tool:
-        latency_tool.stop("tts", ws.app.state.redis)
+        await latency_tool.stop("tts", ws.app.state.redis)
 
 
 async def send_response_to_acs(
     ws: WebSocket,
     text: str,
-    *,
-    blocking: bool = False,
+    *,    blocking: bool = False,
     latency_tool: Optional[LatencyTool] = None,
 ) -> Optional[asyncio.Task]:
     """
@@ -57,28 +59,36 @@ async def send_response_to_acs(
         latency_tool.start("tts")
     synth: SpeechSynthesizer = ws.app.state.tts_client
     pcm = synth.synthesize_to_base64_frames(text, sample_rate=16000)
+    
+    # If TTS failed and returned empty bytes, don't send anything
+    if not pcm:
+        logger.warning("TTS returned empty audio data, skipping audio transmission")
+        if latency_tool:
+            await latency_tool.stop("tts", ws.app.state.redis)
+        return None
+        
     coro = send_pcm_frames(ws, pcm_bytes=pcm, sample_rate=16000)
 
     if blocking:
         await coro
         if latency_tool:
-            latency_tool.stop("tts", ws.app.state.redis)
+            await latency_tool.stop("tts", ws.app.state.redis)
         return None
 
     if not hasattr(ws.app.state, "tts_tasks"):
-        ws.app.state.tts_tasks = set()  # type: Set[asyncio.Task]
+        ws.app.state.tts_tasks = set()
 
     task = asyncio.create_task(coro)
     ws.app.state.tts_tasks.add(task)
 
-    async def stop_latency(_):
-        if latency_tool:
-            latency_tool.stop("tts", ws.app.state.redis)
-        ws.app.state.tts_tasks.discard(task)
-
+    def stop_latency(task):
+        async def _stop():
+            if latency_tool:
+                await latency_tool.stop("tts", ws.app.state.redis)
+            ws.app.state.tts_tasks.discard(task)
+        asyncio.create_task(_stop())
     task.add_done_callback(stop_latency)
     return task
-
 
 async def push_final(
     ws: WebSocket,

@@ -1,3 +1,4 @@
+# --- Recording Initiation Helper ---
 """
 acs_helpers.py
 
@@ -7,11 +8,15 @@ This module provides helper functions and utilities for integrating with Azure C
 
 import json
 from base64 import b64encode
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 from fastapi import WebSocket, WebSocketDisconnect
+from fastapi.websockets import WebSocketState
 from src.acs.acs_helper import AcsCaller
 from rtagents.RTAgent.backend.settings import (
+    ACS_RECORDING_CALLBACK_PATH,
+    AZURE_STORAGE_ACCOUNT_NAME,
+    AZURE_STORAGE_RECORDING_CONTAINER_NAME,
     ACS_CALLBACK_PATH,
     ACS_CONNECTION_STRING,
     ACS_SOURCE_PHONE_NUMBER,
@@ -22,35 +27,6 @@ from utils.ml_logging import get_logger
 
 # --- Init Logger ---
 logger = get_logger()
-
-
-# --- Helper Functions for Initialization ---
-def construct_websocket_url(base_url: str, path: str) -> Optional[str]:
-    """Constructs a WebSocket URL from a base URL and path."""
-    if not base_url:  # Added check for empty base_url
-        logger.error("BASE_URL is empty or not provided.")
-        return None
-    if "<your" in base_url:  # Added check for placeholder
-        logger.warning(
-            "BASE_URL contains placeholder. Please update environment variable."
-        )
-        return None
-
-    base_url_clean = base_url.strip("/")
-    path_clean = path.strip("/")
-
-    if base_url.startswith("https://"):
-        return f"wss://{base_url_clean}/{path_clean}"
-    elif base_url.startswith("http://"):
-        logger.warning(
-            "BASE_URL starts with http://. ACS Media Streaming usually requires wss://."
-        )
-        return f"ws://{base_url_clean}/{path_clean}"
-    else:
-        logger.error(
-            f"Cannot determine WebSocket protocol (wss/ws) from BASE_URL: {base_url}"
-        )
-        return None
 
 
 def initialize_acs_caller_instance() -> Optional[AcsCaller]:
@@ -115,42 +91,6 @@ def construct_websocket_url(base_url: str, path: str) -> Optional[str]:
         )
         return None
 
-
-def initialize_acs_caller_instance() -> Optional[AcsCaller]:
-    """Initializes and returns the ACS Caller instance if configured, otherwise None."""
-    if not all([ACS_CONNECTION_STRING, ACS_SOURCE_PHONE_NUMBER, BASE_URL]):
-        logger.warning(
-            "ACS environment variables not fully configured. ACS calling disabled."
-        )
-        return None
-
-    acs_callback_url = f"{BASE_URL.strip('/')}{ACS_CALLBACK_PATH}"
-    acs_websocket_url = construct_websocket_url(BASE_URL, ACS_WEBSOCKET_PATH)
-
-    if not acs_websocket_url:
-        logger.error(
-            "Could not construct valid ACS WebSocket URL. ACS calling disabled."
-        )
-        return None
-
-    logger.info("Attempting to initialize AcsCaller...")
-    logger.info(f"ACS Callback URL: {acs_callback_url}")
-    logger.info(f"ACS WebSocket URL: {acs_websocket_url}")
-
-    try:
-        caller_instance = AcsCaller(
-            source_number=ACS_SOURCE_PHONE_NUMBER,
-            acs_connection_string=ACS_CONNECTION_STRING,
-            acs_callback_path=acs_callback_url,
-            acs_media_streaming_websocket_path=acs_websocket_url,
-        )
-        logger.info("AcsCaller initialized successfully.")
-        return caller_instance
-    except Exception as e:
-        logger.error(f"Failed to initialize AcsCaller: {e}", exc_info=True)
-        return None
-
-
 async def broadcast_message(
     connected_clients: List[WebSocket], message: str, sender: str = "system"
 ):
@@ -194,12 +134,21 @@ async def send_pcm_frames(ws: WebSocket, pcm_bytes: bytes, sample_rate: int):
 
 async def send_data(websocket, buffer):
     if websocket.client_state == WebSocketState.CONNECTED:
-        data = {"Kind": "AudioData", "AudioData": {"data": buffer}, "StopAudio": None}
+        data = {
+            "Kind": "AudioData",
+            "AudioData": {"data": buffer},
+            "StopAudio": None
+        }
         # Serialize the server streaming data
         serialized_data = json.dumps(data)
-        print(f"Out Streaming Data ---> {serialized_data}")
+        logger.info(f"Out Streaming Data ---> {serialized_data}")
         # Send the chunk over the WebSocket
-        await websocket.send_json(data)
+        try:
+            await websocket.send_json(data)
+        except WebSocketDisconnect:
+            logger.warning("WebSocket disconnected while sending data.")
+        except Exception as e:
+            logger.error(f"Error while sending data over WebSocket: {e}")
 
 
 async def stop_audio(websocket):
@@ -222,3 +171,106 @@ async def resume_audio(websocket):
         start_payload = {"Kind": "StartAudio", "AudioData": None, "StartAudio": {}}
         await websocket.send_json(start_payload)
         logger.info("🎙️ Sent StartAudio command to ACS WebSocket.")
+
+
+
+async def initiate_acs_call_recording(
+    call_connection_id: str,
+    participants: Optional[List[Dict[str, Any]]] = None,
+    call_service: Optional[AcsCaller] = None
+) -> Dict[str, Any]:
+    """
+    Initiate ACS call recording using the enhanced session manager
+    Following Azure security, compliance, and operational excellence patterns
+    """
+    try:
+        if not participants:
+            logger.error(
+                f"❌ No participants found for recording initiation",
+                extra={"call_connection_id": call_connection_id}
+            )
+            return {
+                "success": False,
+                "error": "No participants available for recording",
+                "recording_id": None
+            }
+        
+        # Get recording configuration from settings with Azure Key Vault integration
+        
+        storage_account_name = AZURE_STORAGE_ACCOUNT_NAME
+        
+        if not storage_account_name:
+            logger.error(
+                f"❌ Storage account name not configured",
+                extra={"call_connection_id": call_connection_id}
+            )
+            return {
+                "success": False,
+                "error": "Storage account not configured",
+                "recording_id": None
+            }
+        
+        # Initialize ACS caller with Managed Identity
+        call_service
+        
+        # Start recording with comprehensive error handling
+        recording_result = await call_service.start_recording_for_participants(
+            call_connection_id=call_connection_id,
+            recording_callback_url=f"{BASE_URL.strip('/')}{ACS_RECORDING_CALLBACK_PATH}",
+            participants=participants,
+            storage_account_name=storage_account_name,
+            recording_container=AZURE_STORAGE_RECORDING_CONTAINER_NAME
+        )
+        
+        if recording_result.get("success"):
+            recording_id = recording_result.get("recording_id")
+            
+            logger.info(
+                f"✅ Recording started successfully",
+                extra={
+                    "call_connection_id": call_connection_id,
+                    "recording_id": recording_id,
+                    "participants_count": len(participants),
+                    "storage_account": storage_account_name
+                }
+            )
+            
+            return {
+                "success": True,
+                "recording_id": recording_id,
+                "participants_count": len(participants),
+                "storage_account": storage_account_name
+            }
+        else:
+            error_message = recording_result.get("error", "Unknown recording error")
+            
+            logger.error(
+                f"❌ Recording failed",
+                extra={
+                    "call_connection_id": call_connection_id,
+                    "error": error_message,
+                    "participants_count": len(participants)
+                }
+            )
+            
+            return {
+                "success": False,
+                "error": error_message,
+                "recording_id": None
+            }
+            
+    except Exception as e:
+        logger.error(
+            f"❌ Exception in recording initiation",
+            extra={
+                "call_connection_id": call_connection_id,
+                "error": str(e)
+            },
+            exc_info=True
+        )
+        
+        return {
+            "success": False,
+            "error": str(e),
+            "recording_id": None
+        }

@@ -21,7 +21,7 @@ from azure.core.exceptions import HttpResponseError
 from azure.core.messaging import CloudEvent
 from azure.cognitiveservices.speech.audio import AudioStreamFormat, PushAudioInputStream
 from rtagents.RTAgent.backend.services.acs.acs_helpers import stop_audio
-from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect, Depends
 from fastapi.responses import JSONResponse
 from fastapi.websockets import WebSocketState
 from pydantic import BaseModel
@@ -40,54 +40,17 @@ from shared_ws import (
 from rtagents.RTAgent.backend.postcall.push import build_and_flush
 from rtagents.RTAgent.backend.settings import (
     ACS_CALL_PATH,
-    ACS_RECORDING_CALLBACK_PATH,
     ACS_CALLBACK_PATH,
     ACS_WEBSOCKET_PATH,
 )
-from rtagents.RTAgent.backend.services.acs.events import RecordingConfig
-
+from src.redis.async_manager import AsyncAzureRedisManager as AzureRedisManager
+from rtagents.RTAgent.backend.services.acs.events import ACSEventManager, RecordingConfig
+from rtagents.RTAgent.backend.services.acs.acs_call_service import ACSCallService, initialize_acs_caller_instance
 
 from utils.ml_logging import get_logger
-
 logger = get_logger("routers.acs")
+
 router = APIRouter()
-
-
-# --------------------------------------------------------------------------- #
-#  1. Call initiation  (POST /call)
-# --------------------------------------------------------------------------- #
-class CallRequest(BaseModel):
-    target_number: str
-
-
-@router.post(ACS_CALL_PATH)
-async def initiate_call(call: CallRequest, request: Request):
-    acs = request.app.state.call_service
-    if not acs:
-        raise HTTPException(503, "ACS Caller not initialised")
-
-    try:
-        result = await acs.initiate_call(call.target_number)
-        if result.get("status") != "created":
-            return JSONResponse({"status": "failed"}, status_code=400)
-
-        call_id = result["call_id"]
-        logger.info("Call initiated – ID=%s", call_id)
-        return {"message": "Call initiated", "callId": call_id}
-    except (HttpResponseError, RuntimeError) as exc:
-        logger.error("ACS error: %s", exc, exc_info=True)
-        raise HTTPException(500, str(exc)) from exc
-
-
-# --------------------------------------------------------------------------- #
-#  2. Callback events  (POST /call/callbacks)
-# --------------------------------------------------------------------------- #
-from .handlers.acs_call_handler import (
-    handle_call_connected,
-    handle_participants_updated,
-    handle_call_disconnected,
-    
-)
 
 # Initialize ACS Event Manager with recording configuration
 recording_config = RecordingConfig(
@@ -99,83 +62,275 @@ recording_config = RecordingConfig(
     enable_transcription=False,
 )
 
-@router.post(ACS_RECORDING_CALLBACK_PATH)
-async def recording_callbacks(request: Request):
-    if not request.app.state.call_service:
-        return JSONResponse({"error": "ACS not initialised"}, status_code=503)
+# def get_session_manager(request: Request) -> ACSSessionManager:
+#     """
+#     Get session manager from app state
+#     Following FastAPI dependency injection best practices
+#     """
+#     if not hasattr(request.app.state, 'session_manager'):
+#         logger.error("❌ Session manager not initialized in app state")
+#         raise HTTPException(
+#             status_code=500,
+#             detail="Session manager not available"
+#         )
+#     return request.app.state.session_manager
+
+def get_call_service(request: Request) -> ACSCallService:
+    """Get call service from app state with error handling"""
+    if not hasattr(request.app.state, 'call_service'):
+        logger.error("❌ Call service not initialized in app state")
+        raise HTTPException(
+            status_code=500,
+            detail="Call service not available"
+        )
+    return request.app.state.call_service
+
+def get_conversation_manager(request: Request) -> ConversationManager:
+    """Get conversation manager from app state with error handling"""
+    if not hasattr(request.app.state, 'conversation_manager'):
+        logger.error("❌ Conversation manager not initialized in app state")
+        raise HTTPException(
+            status_code=500,
+            detail="Conversation Manager service not available"
+        )
+    return request.app.state.conversation_manager
+
+def get_redis_manager(request: Request) -> Optional[AzureRedisManager]:
+    """Get Redis manager from app state with error handling"""
+    if not hasattr(request.app.state, 'redis'):
+        logger.error("❌ Redis manager not initialized in app state")
+        raise HTTPException(
+            status_code=500,
+            detail="Redis Manager service not available"
+        )
+    return request.app.state.redis
+
+def get_event_manager(call_id, request: Request) -> ACSEventManager:
+    """Get event manager from app state (initialized with shared services)"""
+    return ACSEventManager(
+            call_id=call_id,
+            recording_config=recording_config,
+            session_manager=get_session_manager(request),
+            call_service=get_call_service(request),
+            conversation_manager=get_conversation_manager(request),
+            redis_mgr=get_redis_manager(request),
+            app_state=request.app.state,
+    )
+# # Initialize ACS Event Manager
+# def get_acs_event_manager() -> ACSEventManager:
+#     """
+#     Factory function for ACSEventManager with proper configuration
+#     Following Azure dependency injection patterns
+#     """
+#     recording_config = RecordingConfig(
+#         auto_start_on_connect=True,  # Configure based on environment
+#         storage_account_name=None  # Will be loaded from settings
+#     )
+#     return ACSEventManager(recording_config=recording_config)
+
+# --------------------------------------------------------------------------- #
+#  1. Call initiation  (POST /call)
+# --------------------------------------------------------------------------- #
+class CallRequest(BaseModel):
+    target_number: str
+
+
+@router.post("/api/call")
+async def initiate_call(call: CallRequest, request: Request):
 
     try:
-        events = await request.json()
-        for raw in events:
-            event = CloudEvent.from_dict(raw)
-            etype = event.type
-            cid = event.data.get("callConnectionId")
-            if etype == "Microsoft.Communication.RecordingStateChanged":
-                state = event.data.get("state")
-                if state == "Completed":
-                    logger.info("Recording completed for call %s", cid)
-                elif state == "Failed":
-                    logger.error("Recording failed for call %s", cid)
-                else:
-                    logger.info("Recording state changed: %s for call %s", state, cid)
-        return {"status": "recording callback received"}
-    except Exception as exc:    # pylint: disable=broad-except
-        logger.error("Recording callback error: %s", exc, exc_info=True)
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        
+        acs = request.app.state.call_service
+        redis_mgr = request.app.state.redis
+        # cm = request.app.state.conversation_manager
+        cm = await ConversationManager.from_redis(
+            session_id=call.target_number, 
+            redis_mgr=redis_mgr
+        )
+        acs_session_manager = request.app.state.session_manager
 
+        if not acs or not redis_mgr:
+            raise HTTPException(503, "ACS Caller or Redis Manager not initialised")
+
+        result = await acs.initiate_call(call.target_number)
+        if result.get("status") != "created":
+            return JSONResponse({"status": "failed"}, status_code=400)
+
+        call_id = result["call_id"]
+        logger.info("Call initiated – ID=%s", call_id)
+
+        # Create or retrieve session for this call
+        loaded_cm = await cm.from_redis(call_id, redis_mgr)
+
+        session_result = await loaded_cm.persist_to_redis(
+            ttl_seconds=3600  # Set TTL for 1 hour
+        )
+
+
+        # session_result = await acs_session_manager.create_session(
+        #     call_connection_id=call_id,
+        # )
+
+        if not session_result:
+            logger.error(f"Failed to create session for call ID: {call_id}")
+            raise HTTPException(500, "Failed to create session for call")
+
+    except (HttpResponseError, RuntimeError) as exc:
+        logger.error("ACS error: %s", exc, exc_info=True)
+        raise HTTPException(500, str(exc)) from exc
+
+
+# --------------------------------------------------------------------------- #
+#  2. Callback events  (POST /call/callbacks)  
+# --------------------------------------------------------------------------- #
 @router.post(ACS_CALLBACK_PATH)
-async def callbacks(request: Request):
-    if not request.app.state.call_service:
-        return JSONResponse({"error": "ACS not initialised"}, status_code=503)
-
+async def callbacks(
+    request: Request,
+) -> JSONResponse:
+    """
+    Enhanced ACS callback handler with comprehensive event management.
+    
+    Features:
+    - Automatic recording start/stop based on call events
+    - Session tracking and state management
+    - Comprehensive error handling and logging
+    - Integration with existing conversation management
+    """
+    correlation_id = request.headers.get("x-correlation-id", "unknown")
+    
     try:
-        events = await request.json()
-        for raw in events:
-            event = CloudEvent.from_dict(raw)
-            etype = event.type
-            cid = event.data.get("callConnectionId")
-            handler_mapping = {
-                "Microsoft.Communication.CallConnected": lambda: handle_call_connected(
-                    event, 
-                    recording_config, 
-                    request.app.state.redis, 
-                    request.app.state.call_service
-                ),
-                "Microsoft.Communication.ParticipantsUpdated": lambda: handle_participants_updated(
-                    event, 
-                    request.app.state.redis
-                ),
-                "Microsoft.Communication.CallDisconnected": lambda: handle_call_disconnected(
-                    event, 
-                    correlation_id=cid, 
-                    redis_manager=request.app.state.redis,
-                    call_service=request.app.state.call_service
-                ),
+        # Parse the incoming callback data
+        callback_data = await request.json()
+        
+        # Extract event information for routing
+        events = callback_data if isinstance(callback_data, list) else [callback_data]
+        
+        # Process each event with proper error handling and logging
+        results = []
+        
+
+        for event in events:
+            try:
+                # Extract event type and routing information
+                event_type = event.get("type", "unknown")
+                call_connection_id = event.get("call_connection_id", "unknown")
+                event_manager = get_event_manager(call_connection_id, request)        
+                # Add correlation ID for distributed tracing
+                event["correlation_id"] = correlation_id
+                
+                logger.info(
+                    f"🔄 Processing ACS event: {event_type}",
+                    extra={
+                        "event_type": event_type,
+                        "call_connection_id": call_connection_id,
+                        "correlation_id": correlation_id
+                    }
+                )
+                
+                # Route to appropriate event handler using enhanced event manager
+                result = await event_manager.process_callback_events(call_connection_id=call_connection_id, events=[event])
+                
+                # Enhanced result processing with Azure monitoring patterns
+                if result.get("success", False):
+                    logger.info(
+                        f"✅ Successfully processed {event_type}",
+                        extra={
+                            "event_type": event_type,
+                            "call_connection_id": call_connection_id,
+                            "correlation_id": correlation_id,
+                            "result": result
+                        }
+                    )
+                else:
+                    logger.warning(
+                        f"⚠️ Event processing completed with warnings: {event_type}",
+                        extra={
+                            "event_type": event_type,
+                            "call_connection_id": call_connection_id,
+                            "correlation_id": correlation_id,
+                            "error": result.get("error", "Unknown issue")
+                        }
+                    )
+                
+                results.append({
+                    "event_type": event_type,
+                    "call_connection_id": call_connection_id,
+                    "success": result.get("success", False),
+                    "result": result
+                })
+                
+            except Exception as event_error:
+                # Handle individual event processing errors gracefully
+                logger.error(
+                    f"❌ Error processing individual event: {event.get('type', 'unknown')}",
+                    extra={
+                        "event_type": event.get("type", "unknown"),
+                        "call_connection_id": event.get("call_connection_id", "unknown"),
+                        "correlation_id": correlation_id,
+                        "error": str(event_error)
+                    },
+                    exc_info=True
+                )
+                
+                results.append({
+                    "event_type": event.get("type", "unknown"),
+                    "call_connection_id": event.get("call_connection_id", "unknown"),
+                    "success": False,
+                    "error": str(event_error)
+                })
+        
+        # Aggregate results and determine overall success
+        total_events = len(results)
+        successful_events = sum(1 for r in results if r.get("success", False))
+        success_rate = successful_events / total_events if total_events > 0 else 0
+        
+        # Log aggregate results for monitoring
+        logger.info(
+            f"📊 ACS callback batch processed: {successful_events}/{total_events} successful",
+            extra={
+                "total_events": total_events,
+                "successful_events": successful_events,
+                "success_rate": success_rate,
+                "correlation_id": correlation_id
             }
+        )
+        
+        # Return structured response following Azure API patterns
+        response_data = {
+            "success": success_rate >= 0.8,  # Consider 80%+ success rate as overall success
+            "total_events": total_events,
+            "successful_events": successful_events,
+            "success_rate": success_rate,
+            "results": results,
+            "correlation_id": correlation_id
+        }
+        
+        return JSONResponse(
+            status_code=200,
+            content=response_data
+        )
 
-            handler = handler_mapping.get(etype)
-            if handler:
-                await handler()
-
-            else:
-                logger.warning(f"Unhandled event type: {etype}")
-
-            emoji = {
-                "Microsoft.Communication.ParticipantsUpdated": "👥",
-                "Microsoft.Communication.CallConnected": "📞",
-                "Microsoft.Communication.CallDisconnected": "❌",
-                "Microsoft.Communication.MediaStreamingStarted": "🎙️",
-                "Microsoft.Communication.MediaStreamingStopped": "🛑",
-            }.get(etype, "ℹ️")
-
-            # await broadcast_message(request.app.state.clients, f"{emoji} {etype}")
-            logger.info("%s %s %s",emoji, etype, cid)
-        return {"status": "callback received"}
-    except Exception as exc:  # pylint: disable=broad-except
-        logger.error("Callback error: %s", exc, exc_info=True)
-        return JSONResponse({"error": str(exc)}, status_code=500)
-
-
+    except Exception as e:
+        # Handle top-level processing errors with comprehensive logging
+        logger.error(
+            f"❌ Critical error in ACS callback processing",
+            extra={
+                "correlation_id": correlation_id,
+                "error": str(e),
+                "request_path": str(request.url)
+            },
+            exc_info=True
+        )
+        
+        # Return error response following Azure error handling patterns
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error": "Internal server error processing ACS callbacks",
+                "correlation_id": correlation_id,
+            }
+        )
 # --------------------------------------------------------------------------- #
 #  3. Media-streaming WebSocket  (WS /call/stream)
 # --------------------------------------------------------------------------- #
@@ -209,8 +364,8 @@ async def acs_media_ws(ws: WebSocket):
     )
     recogniser.start_continuous_recognition_async()
 
-    redis_mgr = ws.app.state.redis
-    cm = await ConversationManager.from_redis(cid, redis_mgr)
+    cm = await ws.app.state.conversation_manager.load_from_redis(cid)
+    ws.state.lt = LatencyTool(cm)
 
     clients = ws.app.state.clients
     greeted: set[str] = ws.app.state.greeted_call_ids
@@ -291,8 +446,9 @@ async def acs_media_ws(ws: WebSocket):
         push_stream.close()
         await ws.close()
         call_user_raw_ids.pop(cid, None)
-        await cm.persist_to_redis(redis_mgr)
+        await cm.persist_to_redis()
         logger.info("◀ media WS closed – %s", cid)
+
 
 
 # @router.websocket(ACS_WEBSOCKET_PATH)
@@ -307,10 +463,17 @@ async def acs_media_ws(ws: WebSocket):
 #     logger.info("▶ media WS connected – %s", cid)
 
 #     # ── per-call objects ────────────────────────────────────────────────────
-#     redis_mgr = ws.app.state.redis
-#     cm = ConversationManager.from_redis(cid, redis_mgr)
-#     ws.state.cm = cm
-#     ws.state.lt = LatencyTool(cm)
+#     cm = ws.app.state.conversation_manager
+#     try:
+      
+#         if not cm:
+#             raise ValueError(f"Failed to initialize ConversationManager with Redis for call ID: {cid}")
+#         ws.state.cm = cm
+#         ws.state.lt = LatencyTool(cm)
+#     except Exception as e:
+#         logger.error(f"Error initializing ConversationManager or LatencyTool: {e}", exc_info=True)
+#         await ws.close(code=1011)
+#         return
 
 #     # greeting (once per call)
 #     if cid not in ws.app.state.greeted_call_ids:
@@ -438,9 +601,10 @@ async def acs_media_ws(ws: WebSocket):
 #         with contextlib.suppress(Exception):
 #             await transcribe_task
 #         with contextlib.suppress(Exception):
-#             await ws.close()
+#             if ws.client_state == WebSocketState.CONNECTED:
+#                 await ws.close()
 #         call_user_raw_ids.pop(cid, None)
-#         cm.persist_to_redis(redis_mgr)
+#         await cm.persist_to_redis()
 #         try:
 #             cm = getattr(ws.state, "cm", None)
 #             cosmos = getattr(ws.app.state, "cosmos", None)
@@ -449,3 +613,4 @@ async def acs_media_ws(ws: WebSocket):
 #         except Exception as e:
 #             logger.error(f"Error persisting analytics: {e}", exc_info=True)
 #         logger.info("◀ media WS closed – %s", cid)
+

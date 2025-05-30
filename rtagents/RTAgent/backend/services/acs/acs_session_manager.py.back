@@ -1,0 +1,454 @@
+from typing import List, Dict, Any, Optional
+from datetime import datetime
+from utils.ml_logging import get_logger
+from rtagents.RTAgent.backend.orchestration.conversation_state import ConversationManager
+from src.redis.async_manager import AsyncAzureRedisManager
+
+logger = get_logger(__name__)
+
+class ACSSessionManager:
+    """
+    Specialized session manager for ACS call operations
+    Follows Azure best practices for separation of concerns and single responsibility
+    """
+    
+    def __init__(self, conversation_manager: Optional[ConversationManager] = None) -> None:
+        """
+        Initialize ACS Session Manager with optional ConversationManager instance
+        Following dependency injection patterns for testability
+        """
+        self._conversation_manager = conversation_manager 
+        self._correlation_id = None
+    
+        
+    async def create_session(
+        self, 
+        call_connection_id: str,  # REQUIRED: Primary session identifier
+        initial_context: Optional[Dict[str, Any]] = None,
+        correlation_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Create new ACS session with call_connection_id as primary key
+        Following Azure operational excellence patterns
+        
+        Args:
+            call_connection_id: Required ACS call connection identifier
+            initial_context: Optional initial session context
+            correlation_id: Optional correlation ID for distributed tracing
+            
+        Returns:
+            Session creation result with success status
+        """
+        if not call_connection_id:
+            logger.error("❌ call_connection_id is required for session creation")
+            return {
+                "success": False,
+                "error": "call_connection_id is required",
+                "session_id": None
+            }
+        
+        # Initialize ConversationManager with the new call_connection_id
+        await self.set_conversation_manager(call_connection_id)
+
+        # Ensure the ConversationManager is properly initialized
+        if not self._conversation_manager:
+            logger.error(f"❌ Failed to initialize ConversationManager for call {call_connection_id}")
+            return {
+                "success": False,
+                "error": "Failed to initialize ConversationManager",
+                "session_id": None
+            }
+
+        try:
+            # Check if session already exists (idempotent creation)
+            existing_context = await self._conversation_manager.get_context(call_connection_id)
+            
+            if existing_context and existing_context.get("session_created"):
+                logger.info(
+                    f"📋 Session already exists for call {call_connection_id}",
+                    extra={
+                        "call_connection_id": call_connection_id,
+                        "correlation_id": correlation_id,
+                        "action": "session_exists"
+                    }
+                )
+                return {
+                    "success": True,
+                    "session_id": call_connection_id,
+                    "status": "already_exists",
+                    "context": existing_context
+                }
+            
+            # Create new session context
+            session_context = {
+                "session_created": True,
+                "session_created_at": datetime.now().isoformat(),
+                "call_connection_id": call_connection_id,
+                "session_id": call_connection_id,  # Use call_connection_id as session_id
+                "correlation_id": correlation_id,
+                "session_state": "created",
+                "call_state": "initializing",
+                "participants": [],
+                "participant_count": 0,
+                "recording_state": "not_started",
+                **(initial_context or {})
+            }
+            
+            # Store session in Redis via ConversationManager
+            await self._conversation_manager.set_context(new_context=session_context)
+
+            logger.info(
+                f"✅ Created ACS session successfully",
+                extra={
+                    "call_connection_id": call_connection_id,
+                    "session_id": call_connection_id,
+                    "correlation_id": correlation_id,
+                    "action": "session_created"
+                }
+            )
+            
+            return {
+                "success": True,
+                "session_id": call_connection_id,
+                "status": "created",
+                "context": session_context
+            }
+            
+        except Exception as e:
+            logger.error(
+                f"❌ Failed to create session for call {call_connection_id}",
+                extra={
+                    "call_connection_id": call_connection_id,
+                    "correlation_id": correlation_id,
+                    "error": str(e)
+                },
+                exc_info=True
+            )
+            
+            return {
+                "success": False,
+                "error": str(e),
+                "session_id": None
+            }
+        
+    def set_correlation_id(self, correlation_id: str) -> None:
+        """Set correlation ID for distributed tracing"""
+        self._correlation_id = correlation_id
+    
+    async def set_conversation_manager(self, call_connection_id: str) -> None:
+        """
+        Set the ConversationManager instance using the call connection ID
+        Following Azure dependency injection and initialization patterns
+        """
+        try:
+            if not self._conversation_manager:
+                self._conversation_manager = await ConversationManager.from_redis(
+                    session_id=call_connection_id,
+                    redis_mgr=AsyncAzureRedisManager()
+                )
+            else:
+                self._conversation_manager.load_from_redis(call_connection_id)
+            logger.info(f"✅ ConversationManager set for call connection ID: {call_connection_id}")
+        except Exception as e:
+            logger.error(f"❌ Failed to set ConversationManager for call connection ID {call_connection_id}: {e}")
+    
+    async def get_session(self, call_connection_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve session using call_connection_id as primary key
+        Following Azure resilience patterns
+        """
+        if not call_connection_id:
+            logger.warning("⚠️ call_connection_id is required for session retrieval")
+            return None
+        
+        try:
+            context = await self._conversation_manager.get_context(call_connection_id)
+            
+            if not context or not context.get("session_created"):
+                logger.warning(
+                    f"⚠️ No active session found for call {call_connection_id}",
+                    extra={"call_connection_id": call_connection_id}
+                )
+                return None
+            
+            return context
+            
+        except Exception as e:
+            logger.error(
+                f"❌ Error retrieving session for call {call_connection_id}: {e}",
+                extra={"call_connection_id": call_connection_id},
+                exc_info=True
+            )
+            return None
+    
+    def validate_call_connection_id(self, call_connection_id: str) -> bool:
+        """
+        Validate call_connection_id format following ACS patterns
+        """
+        if not call_connection_id:
+            return False
+        
+        # ACS call_connection_id is typically a GUID format
+        import re
+        guid_pattern = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        return bool(re.match(guid_pattern, call_connection_id, re.IGNORECASE))
+    
+    # ========== Participant Management ==========
+    
+    async def get_participants(self, call_connection_id: str) -> List[Dict[str, Any]]:
+        """
+        Retrieve participants from conversation context with fallback handling
+        Following Azure resilience patterns for graceful degradation
+        """
+        try:
+            context = await self._conversation_manager.get_context(call_connection_id)
+            
+            # Primary: Get structured participants list
+            participants = context.get("participants", [])
+            
+            if participants:
+                logger.info(f"📥 Retrieved {len(participants)} participants for call {call_connection_id}")
+                return participants
+                
+            # Fallback: Try to get raw IDs and convert to participant objects
+            raw_ids = context.get("participant_raw_ids", [])
+            if raw_ids:
+                participants = [{"raw_id": raw_id} for raw_id in raw_ids]
+                logger.info(f"📥 Fallback: Retrieved {len(participants)} participants from raw IDs")
+                return participants
+                
+            logger.warning(f"⚠️ No participants found for call {call_connection_id}")
+            return []
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to retrieve participants for {call_connection_id}: {e}")
+            return []
+    
+    async def update_participants(
+        self, 
+        call_connection_id: str, 
+        participants: List[Dict[str, Any]],
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """
+        Update participants information in conversation context
+        Following Azure best practices for structured data persistence
+        """
+        try:
+            context = await self._conversation_manager.get_context(call_connection_id)
+            if not context:
+                logger.warning(f"⚠️ No context found for call {call_connection_id}")
+                return False
+
+            # Prepare participant context updates
+            participant_updates = {
+                "participants": participants,
+                "participant_count": len(participants),
+                "participants_updated_at": datetime.now().isoformat(),
+                "participant_raw_ids": [p.get("raw_id") for p in participants if p.get("raw_id")]
+            }
+            
+            # Add metadata if provided
+            if metadata:
+                participant_updates["participants_metadata"] = metadata
+            
+            # Add correlation ID for tracing
+            if self._correlation_id:
+                participant_updates["correlation_id"] = self._correlation_id
+            
+            # Update context
+            context.update(participant_updates)
+            await self._conversation_manager.set_context(call_connection_id, context)
+            
+            logger.info(f"✅ Updated {len(participants)} participants for call {call_connection_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to update participants for {call_connection_id}: {e}")
+            return False
+    
+    # ========== Call State Management ==========
+    
+    async def update_call_state(
+        self, 
+        call_connection_id: str, 
+        state: str, 
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """
+        Update call state in conversation context
+        Following Azure operational excellence patterns
+        """
+        try:
+            context = await self._conversation_manager.get_context(call_connection_id)
+            
+            state_updates = {
+                "call_state": state,
+                "call_state_updated_at": datetime.utcnow().isoformat()
+            }
+            
+            if metadata:
+                state_updates["call_state_metadata"] = metadata
+                
+            if self._correlation_id:
+                state_updates["correlation_id"] = self._correlation_id
+            
+            context.update(state_updates)
+            await self._conversation_manager.set_context(call_connection_id, context)
+            
+            logger.info(f"✅ Updated call state to '{state}' for call {call_connection_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to update call state for {call_connection_id}: {e}")
+            return False
+    
+    # ========== Recording Management ==========
+    
+    async def update_recording_state(
+        self,
+        call_connection_id: str,
+        recording_id: Optional[str] = None,
+        state: str = "not_started",
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """
+        Update recording state in conversation context
+        Following Azure security and compliance patterns
+        """
+        try:
+            context = await self._conversation_manager.get_context(call_connection_id)
+            
+            recording_updates = {
+                "recording_state": state,
+                "recording_state_updated_at": datetime.utcnow().isoformat()
+            }
+            
+            if recording_id:
+                recording_updates["recording_id"] = recording_id
+                
+            if state == "started":
+                recording_updates["recording_started_at"] = datetime.utcnow().isoformat()
+            elif state == "stopped":
+                recording_updates["recording_stopped_at"] = datetime.utcnow().isoformat()
+                
+            if metadata:
+                recording_updates["recording_metadata"] = metadata
+                
+            if self._correlation_id:
+                recording_updates["correlation_id"] = self._correlation_id
+            
+            context.update(recording_updates)
+            await self._conversation_manager.set_context(call_connection_id, context)
+            
+            logger.info(f"✅ Updated recording state to '{state}' for call {call_connection_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to update recording state for {call_connection_id}: {e}")
+            return False
+    
+    # ========== Generic Context Management ==========
+    
+    async def update_context_field(
+        self,
+        call_connection_id: str,
+        field_name: str,
+        field_value: Any,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """
+        Generic method to update any context field with metadata
+        Following Azure best practices for flexible data management
+        """
+        try:
+            context = await self._conversation_manager.get_context(call_connection_id)
+            
+            context_updates = {
+                field_name: field_value,
+                f"{field_name}_updated_at": datetime.utcnow().isoformat()
+            }
+            
+            if metadata:
+                context_updates[f"{field_name}_metadata"] = metadata
+                
+            if self._correlation_id:
+                context_updates["correlation_id"] = self._correlation_id
+            
+            context.update(context_updates)
+            await self._conversation_manager.set_context(call_connection_id, context)
+            
+            logger.info(f"✅ Updated context field '{field_name}' for call {call_connection_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to update context field '{field_name}' for {call_connection_id}: {e}")
+            return False
+    
+    async def get_context_field(
+        self,
+        call_connection_id: str,
+        field_name: str,
+        default_value: Any = None
+    ) -> Any:
+        """
+        Retrieve a specific context field with default fallback
+        Following Azure resilience patterns for graceful degradation
+        """
+        try:
+            context = await self._conversation_manager.get_context(call_connection_id)
+            return context.get(field_name, default_value)
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to retrieve context field '{field_name}' for {call_connection_id}: {e}")
+            return default_value
+    
+    # ========== Session Management ==========
+    
+    async def get_session_info(self, call_connection_id: str) -> Dict[str, Any]:
+        """
+        Get comprehensive session information for monitoring and debugging
+        Following Azure operational excellence patterns
+        """
+        try:
+            context = await self._conversation_manager.get_context(call_connection_id)
+            
+            session_info = {
+                "call_connection_id": call_connection_id,
+                "call_state": context.get("call_state", "unknown"),
+                "participant_count": context.get("participant_count", 0),
+                "recording_state": context.get("recording_state", "unknown"),
+                "recording_id": context.get("recording_id"),
+                "call_connected_at": context.get("call_connected_at"),
+                "last_updated": context.get("participants_updated_at") or context.get("call_state_updated_at"),
+                "correlation_id": context.get("correlation_id")
+            }
+            
+            return session_info
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to get session info for {call_connection_id}: {e}")
+            return {"error": str(e)}
+    
+    async def cleanup_session(self, call_connection_id: str) -> bool:
+        """
+        Clean up session data following call completion
+        Following Azure cost optimization patterns
+        """
+        try:
+            # You might want to archive certain data before cleanup
+            context = await self._conversation_manager.get_context(call_connection_id)
+            
+            # Archive important call data if needed
+            if context.get("recording_id"):
+                logger.info(f"📁 Archiving call data for recording {context['recording_id']}")
+            
+            # Clear the session context
+            await self._conversation_manager.set_context(call_connection_id, {})
+            
+            logger.info(f"🧹 Cleaned up session for call {call_connection_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to cleanup session for {call_connection_id}: {e}")
+            return False

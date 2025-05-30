@@ -64,7 +64,7 @@ async def realtime_ws(ws: WebSocket):
         session_id = ws.headers.get("x-ms-call-connection-id") or uuid.uuid4().hex[:8]
 
         redis_mgr = ws.app.state.redis
-        cm = ConversationManager.from_redis(session_id, redis_mgr)
+        cm = ws.app.state.conversation_manager
         ws.state.cm = cm
         ws.state.session_id = session_id
         ws.state.lt = LatencyTool(cm)
@@ -78,7 +78,7 @@ async def realtime_ws(ws: WebSocket):
         await send_tts_audio(greeting, ws, latency_tool=ws.state.lt)
         await broadcast_message(ws.app.state.clients, greeting, "Assistant")
         await cm.append_to_history("assistant", greeting)
-        await cm.persist_to_redis(redis_mgr)
+        await cm.persist_to_redis()
 
         # ---------------- main loop -------------------------------------------
         while True:

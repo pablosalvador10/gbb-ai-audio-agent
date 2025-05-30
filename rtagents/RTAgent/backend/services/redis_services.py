@@ -11,3 +11,4 @@ from src.redis.async_manager import AsyncAzureRedisManager as AzureRedisManager
 __all__ = [
     "AzureRedisManager",
 ]
+

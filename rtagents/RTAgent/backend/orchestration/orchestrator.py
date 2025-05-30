@@ -12,7 +12,6 @@ async def route_turn(cm, transcript: str, ws: WebSocket, *, is_acs: bool) -> Non
 
     Adds latency tracking for each step.
     """
-    redis_mgr = ws.app.state.redis
     latency_tool = ws.state.lt
 
     if not cm.get_context("authenticated", False):
@@ -20,7 +19,7 @@ async def route_turn(cm, transcript: str, ws: WebSocket, *, is_acs: bool) -> Non
         latency_tool.start("processing")
         auth_agent = getattr(ws.app.state, "auth_agent", None)
         result = await auth_agent.respond(cm, transcript, ws, is_acs=is_acs)
-        await latency_tool.stop("processing", redis_mgr)
+        await latency_tool.stop("processing")
 
         if result and result.get("authenticated"):
             cm.update_context("authenticated", True)
@@ -44,6 +43,6 @@ async def route_turn(cm, transcript: str, ws: WebSocket, *, is_acs: bool) -> Non
         latency_tool.start("processing")
         task_agent = getattr(ws.app.state, "task_agent", None)
         await task_agent.respond(cm, transcript, ws, is_acs=is_acs)
-        await latency_tool.stop("processing", redis_mgr)
+        await latency_tool.stop("processing")
 
-    await cm.persist_to_redis(redis_mgr)
+    await cm.persist_to_redis()

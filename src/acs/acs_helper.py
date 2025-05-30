@@ -497,7 +497,7 @@ class AcsCaller:
             
             # Stop the recording
             stop_response = self.call_automation_client.stop_recording(
-                server_call_id=server_call_id
+                recording_id=server_call_id
             )
             
             logger.info(f"✅ Recording stopped successfully for call {server_call_id}")

@@ -26,7 +26,6 @@ from .acs_event_manager import (
     ACSEventManager,
     ACSEventType,
     RecordingConfig,
-    CallSession,
 )
 
 from .base_handler import BaseEventHandler
@@ -40,7 +39,6 @@ __all__ = [
     "ACSEventManager",
     "ACSEventType", 
     "RecordingConfig",
-    "CallSession",
     "BaseEventHandler",
     "CallEventHandler",
     "MediaEventHandler",
