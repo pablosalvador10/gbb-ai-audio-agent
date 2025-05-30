@@ -29,7 +29,14 @@ class CosmosDBMongoCoreManager:
         try:
             if connection_string:
                 # Initialize the MongoClient with the connection string
-                self.client = pymongo.MongoClient(connection_string)
+                self.client = pymongo.MongoClient(connection_string, serverSelectionTimeoutMS=5000)
+                try:
+                    # Test the connection to ensure it's valid
+                    self.client.admin.command('ping')
+                    logger.info("Successfully connected to CosmosDB cluster using MongoDB API.")
+                except pymongo.errors.ConnectionError as e:
+                    logger.error(f"Failed to connect to CosmosDB cluster: {e}")
+                    raise
             else:
                 # Use DefaultAzureCredential for authentication
                 credential = DefaultAzureCredential()

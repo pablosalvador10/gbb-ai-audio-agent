@@ -34,6 +34,8 @@ BASE_URL: str = os.getenv("BASE_URL", "")
 
 # API route fragments (keep them in one place so routers can import)
 ACS_CALL_PATH = "/api/call"
+ACS_RESOURCE_ENDPOINT: str = os.getenv("ACS_RESOURCE_ENDPOINT", "")
+
 ACS_RECORDING_CALLBACK_PATH: str = "/call/recording/callbacks"
 ACS_CALLBACK_PATH: str = "/call/callbacks"
 ACS_WEBSOCKET_PATH: str = "/call/stream"
