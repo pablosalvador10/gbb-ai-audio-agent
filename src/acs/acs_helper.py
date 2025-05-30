@@ -76,26 +76,24 @@ from azure.core.messaging import CloudEvent
 from src.blob.blob_helper import save_transcript_to_blob
 
 from typing import List, Dict, Any, Optional
+from azure.identity import DefaultAzureCredential
 
 logger = logging.getLogger(__name__)
-
-
 class AcsCaller:
     source_number: str
-    acs_connection_string: str
     acs_callback_path: str
     websocket_url: str
     media_streaming_configuration: MediaStreamingOptions
     call_automation_client: CallAutomationClient
+    acs_connection_string: Optional[str]
 
     def __init__(
         self,
         source_number: str,
-        acs_connection_string: str,
         acs_callback_path: str,
         acs_media_streaming_websocket_path: str,
+        acs_connection_string: Optional[str] = None,
         media_streaming_configuration: MediaStreamingOptions = None,
-        # tts_translator: SpeechCoreTranslator
     ):
         self.source_number = source_number
         self.acs_connection_string = acs_connection_string
@@ -117,18 +115,25 @@ class AcsCaller:
                 audio_format=AudioFormat.PCM16_K_MONO,  # Ensure this matches what your STT expects
             )
         else:
-            self.media_streaming_configuration = media_streaming_configuration    # Initialize CallAutomationClient here to reuse it
+            self.media_streaming_configuration = media_streaming_configuration
+
+        # Initialize CallAutomationClient here to reuse it
         try:
-            self.call_automation_client = CallAutomationClient.from_connection_string(
-                self.acs_connection_string
-            )
-            logger.info("CallAutomationClient initialized successfully.")
+            if self.acs_connection_string:
+                self.call_automation_client = CallAutomationClient.from_connection_string(
+                    self.acs_connection_string
+                )
+                logger.info("CallAutomationClient initialized successfully using connection string.")
+            else:
+                self.call_automation_client = CallAutomationClient(
+                    credential=DefaultAzureCredential()
+                )
+                logger.info("CallAutomationClient initialized successfully using DefaultAzureCredential.")
         except Exception as e:
             logger.error(
                 f"Failed to initialize CallAutomationClient: {e}", exc_info=True
             )
             self.call_automation_client = None  # Ensure it's None if init fails
-
     async def initiate_call(self, target_number: str):
         if not self.call_automation_client:
             logger.error("CallAutomationClient not initialized. Cannot initiate call.")

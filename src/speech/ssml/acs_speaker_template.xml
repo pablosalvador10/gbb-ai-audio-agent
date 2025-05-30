@@ -1,0 +1,10 @@
+<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xmlns:mstts="http://www.w3.org/2001/mstts" xml:lang="{language}">
+    <voice name="{voice}">
+        <mstts:express-as style="{style}">
+            <prosody rate="{rate}" pitch="{pitch}" volume="{volume}">
+                {text}
+            </prosody>
+        </mstts:express-as>
+    </voice>
+</speak>
+'Connection was closed by the remote host. Error code: 1007. Error details: Status(StatusCode="FailedPrecondition", Detail="SSML parsing error: 0x80045003 - The caller has spec USP state: TurnStarted. Received audio size: 0 bytes.'
