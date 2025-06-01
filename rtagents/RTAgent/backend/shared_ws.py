@@ -38,7 +38,7 @@ async def send_tts_audio(
     synth: SpeechSynthesizer = ws.app.state.tts_client
     synth.start_speaking_text(text)
     if latency_tool:
-        latency_tool.stop("tts", ws.app.state.redis)
+        await latency_tool.stop("tts", ws.app.state.redis)
 
 
 async def send_response_to_acs(
@@ -62,18 +62,18 @@ async def send_response_to_acs(
     if blocking:
         await coro
         if latency_tool:
-            latency_tool.stop("tts", ws.app.state.redis)
+            await latency_tool.stop("tts", ws.app.state.redis)
         return None
 
     if not hasattr(ws.app.state, "tts_tasks"):
-        ws.app.state.tts_tasks = set()  # type: Set[asyncio.Task]
+        ws.app.state.tts_tasks = set()
 
     task = asyncio.create_task(coro)
     ws.app.state.tts_tasks.add(task)
 
     async def stop_latency(_):
         if latency_tool:
-            latency_tool.stop("tts", ws.app.state.redis)
+            await latency_tool.stop("tts", ws.app.state.redis)
         ws.app.state.tts_tasks.discard(task)
 
     task.add_done_callback(stop_latency)

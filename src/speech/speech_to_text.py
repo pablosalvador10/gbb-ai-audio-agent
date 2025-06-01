@@ -79,6 +79,9 @@ class SpeechCoreTranslator:
         """
         self.supported_languages.append(language)
 
+    
+
+    # Deprecated, use create_recognizer instead
     def create_realtime_recognizer(
         self,
         push_stream: speechsdk.audio.PushAudioInputStream,

@@ -2,6 +2,12 @@
 
 ## 🎯 Project Overview
 This is a Voice AI Agent backend built with FastAPI, Azure Communication Services, and Azure OpenAI. The project follows enterprise-grade patterns for secure, scalable, and maintainable cloud-native applications.
+##  guiding principles
+- **Prioritize Simplicity**: Write code that is easy to understand and maintain. Avoid unnecessary complexity.
+- **Emphasize Readability**: Use clear naming conventions and consistent formatting.
+- **Ensure Security**: Implement security best practices from the start.
+- **Build for Resilience**: Design systems that can gracefully handle failures.
+- **Focus on Maintainability**: Create solutions that are easy to update and debug.
 
 ## 🔐 Security & Authentication Guidelines
 

@@ -16,15 +16,18 @@ import time
 from base64 import b64decode
 from typing import Dict, Optional
 import contextlib
+import redis.exceptions
 
 from azure.core.exceptions import HttpResponseError
 from azure.core.messaging import CloudEvent
-from azure.cognitiveservices.speech.audio import AudioStreamFormat, PushAudioInputStream
+from azure.cognitiveservices.speech.audio import AudioStreamFormat, PushAudioInputStream, PullAudioInputStream
 from rtagents.RTAgent.backend.services.acs.acs_helpers import stop_audio
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.websockets import WebSocketState
 from pydantic import BaseModel
+
+from src.speech.sttv2 import AzureSpeechToTextV2
 
 from rtagents.RTAgent.backend.orchestration.conversation_state import (
     ConversationManager,
@@ -43,9 +46,11 @@ from rtagents.RTAgent.backend.settings import (
     ACS_RECORDING_CALLBACK_PATH,
     ACS_CALLBACK_PATH,
     ACS_WEBSOCKET_PATH,
+    AZURE_SPEECH_REGION,
 )
 from rtagents.RTAgent.backend.services.acs.events import RecordingConfig
 
+from rtagents.RTAgent.backend.routers.handlers.interruptible_pull_stream import InterruptiblePullStream
 
 from utils.ml_logging import get_logger
 
@@ -86,7 +91,9 @@ from .handlers.acs_call_handler import (
     handle_call_connected,
     handle_participants_updated,
     handle_call_disconnected,
-    
+    handle_media_streaming_failed,  # New handler
+    handle_media_streaming_started, # New handler
+    handle_media_streaming_stopped, # New handler
 )
 
 # Initialize ACS Event Manager with recording configuration
@@ -134,31 +141,53 @@ async def callbacks(request: Request):
             event = CloudEvent.from_dict(raw)
             etype = event.type
             cid = event.data.get("callConnectionId")
+            correlation_id = event.data.get("correlationId", cid)
+
+            cm = await ConversationManager.from_redis(cid, request.app.state.redis)
             handler_mapping = {
                 "Microsoft.Communication.CallConnected": lambda: handle_call_connected(
                     event, 
                     recording_config, 
-                    request.app.state.redis, 
+                    cm,
                     request.app.state.call_service
                 ),
                 "Microsoft.Communication.ParticipantsUpdated": lambda: handle_participants_updated(
                     event, 
-                    request.app.state.redis
+                    cm
                 ),
                 "Microsoft.Communication.CallDisconnected": lambda: handle_call_disconnected(
                     event, 
-                    correlation_id=cid, 
-                    redis_manager=request.app.state.redis,
+                    call_id=cid, 
+                    conversation_manager=cm,
                     call_service=request.app.state.call_service
+                ),
+                "Microsoft.Communication.MediaStreamingFailed": lambda: handle_media_streaming_failed(
+                    event,
+                    call_id=cid,
+                    conversation_manager=cm,
+                ),
+                "Microsoft.Communication.MediaStreamingStarted": lambda: handle_media_streaming_started(
+                    event,
+                    call_id=cid,
+                    conversation_manager=cm,
+                ),
+                "Microsoft.Communication.MediaStreamingStopped": lambda: handle_media_streaming_stopped(
+                    event,
+                    call_id=cid,
+                    conversation_manager=cm,
+                    # call_service=request.app.state.call_service
                 ),
             }
 
             handler = handler_mapping.get(etype)
             if handler:
-                await handler()
-
+                try:
+                    await handler()
+                except Exception as e:
+                    logger.error(f"Error handling event {etype} for call {cid}: {e}", exc_info=True)
+                    # Continue processing other events even if one fails
             else:
-                logger.warning(f"Unhandled event type: {etype}")
+                logger.warning(f"Unhandled event type: {etype} for call {cid}")
 
             emoji = {
                 "Microsoft.Communication.ParticipantsUpdated": "👥",
@@ -183,118 +212,142 @@ call_user_raw_ids: Dict[str, str] = {}
 
 @router.websocket(ACS_WEBSOCKET_PATH)
 async def acs_media_ws(ws: WebSocket):
-    speech = ws.app.state.stt_client
-    acs = ws.app.state.call_service
-    if not speech or not acs:
-        await ws.close(code=1011)
-        return
-
     await ws.accept()
     cid = ws.headers.get("x-ms-call-connection-id", "UnknownCall")
-    logger.info("▶ media WS connected – %s", cid)
-
-    # ----------------------------------------------------------------------- #
-    #  Local objects
-    # ----------------------------------------------------------------------- #
-    queue: asyncio.Queue[str] = asyncio.Queue()
-    push_stream = PushAudioInputStream(
-        stream_format=AudioStreamFormat(samples_per_second=16000, bits_per_sample=16, channels=1)
-    )
-    recogniser = speech.create_realtime_recognizer(
-        push_stream=push_stream,
-        loop=asyncio.get_event_loop(),
-        message_queue=queue,
-        language="en-US",
-        vad_silence_timeout_ms=500,
-    )
-    recogniser.start_continuous_recognition_async()
-
+    correlation_id = ws.headers.get("x-ms-call-correlation-id", cid)
+    logger.info("▶ media WS connected – %s", cid)    # Access shared resources from app state
+    acs = ws.app.state.call_service
     redis_mgr = ws.app.state.redis
-    cm = await ConversationManager.from_redis(cid, redis_mgr)
-
     clients = ws.app.state.clients
-    greeted: set[str] = ws.app.state.greeted_call_ids
-    if cid not in greeted:
-        greet = (
-            "Hello from XMYX Healthcare Company! Before I can assist you, "
-            "let’s verify your identity. How may I address you?"
-        )
-        await broadcast_message(clients, greet, "Assistant")
-        await send_response_to_acs(ws, greet)
-        await cm.append_to_history("assistant", greet)
-        greeted.add(cid)
+    greeted = ws.app.state.greeted_call_ids
+    tts_client = ws.app.state.tts_client
+    stt_client = ws.app.state.stt_client    # Redis-backed conversation state with fallback
+    try:
+        cm = await ConversationManager.from_redis(cid, redis_mgr)
+        media_session = await cm.get_media_stream_state()
+        user_raw_id = media_session.get("user_raw_id")
+        logger.info(f"✅ Loaded conversation state from Redis for session {cid}")
+    except redis.exceptions.AuthenticationError as auth_error:
+        logger.error(f"❌ Redis authentication failed: {auth_error}")
+        # Create a new conversation manager without Redis dependency
+        cm = ConversationManager(session_id=cid, redis_mgr=None)
+        user_raw_id = None
+        logger.warning(f"⚠️ Created new conversation state (no Redis) for session {cid}")
+    except redis.exceptions.ConnectionError as conn_error:
+        logger.error(f"❌ Redis connection failed: {conn_error}")
+        # Create a new conversation manager without Redis dependency
+        cm = ConversationManager(session_id=cid, redis_mgr=None)
+        user_raw_id = None
+        logger.warning(f"⚠️ Created new conversation state (no Redis) for session {cid}")
+    except Exception as e:
+        logger.error(f"❌ Unexpected Redis error: {e}")
+        # Create a new conversation manager without Redis dependency
+        cm = ConversationManager(session_id=cid, redis_mgr=None)
+        user_raw_id = None
+        logger.warning(f"⚠️ Created new conversation state (fallback) for session {cid}")
 
-    user_raw_id = call_user_raw_ids.get(cid)
+    # Use pull stream for STT
+    pull_stream = InterruptiblePullStream()
+    audio_config = pull_stream.create_audio_config()
+    recognizer = stt_client.create_realtime_recognizer(
+        audio_config=audio_config,
+        correlation_id=correlation_id,
+    )
+
+    transcript_queue: asyncio.Queue[str] = asyncio.Queue()
+
+    # Use continuous recognition for real-time streaming audio
+    def recognized_handler(evt):
+        if evt.result.text:
+            asyncio.create_task(transcript_queue.put(evt.result.text))
+
+    recognizer.recognized.connect(recognized_handler)
+    recognizer.start_continuous_recognition_async()
+
+    # if cid not in greeted:
+    #     greet = "Hello from XMYX Healthcare Company! How may I address you?"
+    #     await broadcast_message(clients, greet, "Assistant")
+    #     await send_response_to_acs(ws, greet)
+    #     await cm.append_to_history("assistant", greet)
+    #     greeted.add(cid)
+    if cid not in greeted:
+        if not await cm.is_call_greeted():
+            greet = "Hello from XMYX Healthcare Company! How may I address you?"
+            await broadcast_message(clients, greet, "Assistant")
+            await send_response_to_acs(ws, greet)
+            await cm.append_to_history("assistant", greet)
+            await cm.mark_call_greeted()
+
+    user_raw_id = None
 
     try:
-        # --- inside acs_media_ws ---------------------------------------------------
-        while True:
-            spoken: str | None = None
-            try:
-                while True:
-                    item = queue.get_nowait()
-                    spoken = f"{spoken} {item}".strip() if spoken else item
-                    queue.task_done()
-            except asyncio.QueueEmpty:
-                pass
-
-            if spoken:
-                ws.app.state.tts_client.stop_speaking()
-                for t in list(getattr(ws.app.state, "tts_tasks", [])):
-                    t.cancel()
-
-                await broadcast_message(clients, spoken, "User")
-
-                if check_for_stopwords(spoken):
-                    await broadcast_message(clients, "Goodbye!", "Assistant")
-                    await send_response_to_acs(ws, "Goodbye!", blocking=True)
-                    await asyncio.sleep(1)
-                    await acs.disconnect_call(cid)
-                    break
-
-                await route_turn(cm, spoken, ws, is_acs=True)
-            try:
-                raw = await asyncio.wait_for(ws.receive_text(), timeout=5.0)
-                data = json.loads(raw)
-            except asyncio.TimeoutError:
-                if ws.client_state != WebSocketState.CONNECTED:
-                    break
-                continue
-            except (WebSocketDisconnect, json.JSONDecodeError):
-                break
-
-            kind = data.get("kind")
-            if kind == "AudioData":
-                # dynamically learn / confirm the caller’s participantRawID
-                if not user_raw_id and cid in call_user_raw_ids:
-                    user_raw_id = call_user_raw_ids[cid]
-
-                if user_raw_id and data["audioData"]["participantRawID"] != user_raw_id:
-                    continue        # discard bot’s own audio
-
+        try:
+            while True:
+                # Process transcripts
                 try:
-                    push_stream.write(b64decode(data["audioData"]["data"]))
-                except Exception:
-                    # keep going even if decode glitches
+                    while True:
+                        phrase = transcript_queue.get_nowait()
+                        tts_client.stop_speaking()
+                        for t in getattr(ws.app.state, "tts_tasks", []):
+                            t.cancel()
+
+                        await broadcast_message(clients, phrase, "User")
+                        if check_for_stopwords(phrase):
+                            await broadcast_message(clients, "Goodbye!", "Assistant")
+                            await send_response_to_acs(ws, "Goodbye!", blocking=True)
+                            await acs.disconnect_call(cid)
+                            break
+
+                        await route_turn(cm, phrase, ws, is_acs=True)
+                except asyncio.QueueEmpty:
+                    pass
+
+                # Listen for audio from ACS
+                try:
+                    raw = await asyncio.wait_for(ws.receive_text(), timeout=5.0)
+                    data = json.loads(raw)
+                except (asyncio.TimeoutError, WebSocketDisconnect, json.JSONDecodeError):
+                    if ws.client_state != WebSocketState.CONNECTED:
+                        break
                     continue
 
-            elif kind == "CallConnected":
-                pid = data["callConnected"]["participant"]["rawID"]
-                call_user_raw_ids[cid] = pid
-                user_raw_id = pid
+                kind = data.get("kind")
 
-    finally:
-        try:
-            recogniser.stop_continuous_recognition_async()
-        except Exception:  # pylint: disable=broad-except
-            pass
-        push_stream.close()
-        await ws.close()
-        call_user_raw_ids.pop(cid, None)
-        await cm.persist_to_redis(redis_mgr)
-        logger.info("◀ media WS closed – %s", cid)
+                # When participant is identified:
+                if kind == "CallConnected":
+                    user_raw_id = data["callConnected"]["participant"]["rawID"]
+                    await cm.update_user_raw_id(user_raw_id)
+                if kind == "AudioData":
+                    participant_id = data["audioData"]["participantRawID"]
+                    if not user_raw_id:
+                        user_raw_id = participant_id
+                        await cm.update_user_raw_id(user_raw_id)                    
+                    if participant_id != user_raw_id:
+                        continue
+                    pull_stream.write_audio(b64decode(data["audioData"]["data"]))
 
+                elif kind == "CallConnected":
+                    user_raw_id = data["callConnected"]["participant"]["rawID"]
 
+        finally:
+            recognizer.stop_continuous_recognition_async()
+            if ws.client_state != WebSocketState.DISCONNECTED:
+                await ws.close()
+            
+            # Safely persist to Redis with error handling
+            try:
+                await cm.persist_to_redis(redis_mgr)
+                logger.info("✅ Persisted conversation state to Redis for session %s", cid)
+            except redis.exceptions.AuthenticationError as auth_error:
+                logger.error("❌ Redis auth failed during persist: %s", auth_error)
+            except redis.exceptions.ConnectionError as conn_error:
+                logger.error("❌ Redis connection failed during persist: %s", conn_error)
+            except Exception as e:
+                logger.error("❌ Failed to persist to Redis: %s", e)
+            
+            logger.info("◀ media WS closed – %s", cid)
+    except Exception as exc:
+        logger.error("Error in acs_media_ws: %s", exc, exc_info=True)
 # @router.websocket(ACS_WEBSOCKET_PATH)
 # async def acs_media_ws(ws: WebSocket):
 #     acs = ws.app.state.call_service

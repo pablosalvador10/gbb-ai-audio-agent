@@ -21,6 +21,8 @@ from rtagents.RTAgent.backend.settings import (
     ALLOWED_ORIGINS,
     AOAI_STT_KEY,
     AOAI_STT_ENDPOINT,
+    AZURE_SPEECH_REGION,
+    AZURE_STORAGE_ACCOUNT_NAME,
     AZURE_COSMOS_CONNECTION_STRING,
     AZURE_COSMOS_DB_DATABASE_NAME,
     AZURE_COSMOS_DB_COLLECTION_NAME,
@@ -40,30 +42,26 @@ from rtagents.RTAgent.backend.settings import (
 )
 
 # Import services with error handling
-try:
-    from services import (
-        SpeechSynthesizer,
-        SpeechCoreTranslator,
-        CosmosDBMongoCoreManager,
-        AzureRedisManager,
-        EventGridPublisherService
-    )
-except ImportError:
-    # Fallback imports for development
-    from rtagents.RTAgent.backend.services import (
-        SpeechSynthesizer,
-        SpeechCoreTranslator,
-        CosmosDBMongoCoreManager,
-        AzureRedisManager,
-    )
 
+from rtagents.RTAgent.backend.services import (
+    SpeechSynthesizer,
+    SpeechCoreTranslator,
+    CosmosDBMongoCoreManager,
+    AzureRedisManager,
+    EventGridPublisherService,  # Added missing import
+)
+from src.speech.sttv2 import (
+    AzureSpeechToTextV2
+)
 from rtagents.RTAgent.backend.orchestration.conversation_state import ConversationManager
 from rtagents.RTAgent.backend.services.acs.acs_call_service import (
     ACSCallService,
 )
 from rtagents.RTAgent.backend.agents.base import RTAgent
 from rtagents.RTAgent.backend.latency.latency_tool import LatencyTool
-
+from src.speech.ttsv2 import (
+    AzureTextToSpeechV2
+)
 logger = get_logger("lifespan")
 
 
@@ -92,8 +90,16 @@ async def initialize_azure_services(app: FastAPI) -> None:
     # Speech Services initialization with error handling
     try:
         logger.info("🎤 Initializing Speech services...")
-        app.state.stt_client = SpeechCoreTranslator()
-        app.state.tts_client = SpeechSynthesizer(voice=VOICE_TTS)
+        app.state.stt_client = AzureSpeechToTextV2(
+            speech_region=AZURE_SPEECH_REGION,
+            enable_logging=True,
+            log_level="INFO",
+            storage_account_name=AZURE_STORAGE_ACCOUNT_NAME)
+        app.state.tts_client = AzureTextToSpeechV2(
+            speech_region=AZURE_SPEECH_REGION,
+            enable_logging=True,
+            log_level="INFO",
+        )
         app.state.service_health['speech'] = 'healthy'
         logger.info("✅ Speech services initialized successfully")
     except Exception as e:
@@ -104,10 +110,6 @@ async def initialize_azure_services(app: FastAPI) -> None:
     try:
         logger.info("🔴 Initializing Redis and session managers...")
         app.state.redis = AzureRedisManager()
-        app.state.conversation_manager = await ConversationManager.from_redis(
-            session_id="default_session",
-            redis_mgr=app.state.redis
-        )
 
         if hasattr(app.state.redis, 'ping'):
             ping_result = await app.state.redis.ping()
@@ -176,11 +178,21 @@ async def initialize_azure_services(app: FastAPI) -> None:
 
     try:
         logger.info("📞 Initializing ACS caller...")
+        # Prepare the base URL for WebSocket, ensuring wss scheme.
+        # This takes BASE_URL (e.g., "http://host.com" or "https://host.com")
+        # and converts its scheme part to "wss://" for the WebSocket connection.
+        base_url_parts = BASE_URL.split("://", 1)
+        # Use the part after "://" if scheme exists, otherwise use the whole string.
+        host_and_path_part = base_url_parts[-1] 
+        websocket_base_url_with_wss = f"wss://{host_and_path_part}"
+
         app.state.call_service = ACSCallService(
             source_number=ACS_SOURCE_PHONE_NUMBER,
             acs_connection_string=ACS_CONNECTION_STRING,
+            # ACS callbacks are HTTP, so use the original BASE_URL
             acs_callback_path=f"{BASE_URL.rstrip('/')}{ACS_CALLBACK_PATH}",
-            acs_media_streaming_websocket_path=f"{BASE_URL.rstrip('/')}{ACS_WEBSOCKET_PATH}",
+            # ACS media streaming uses WebSocket, ensure wss scheme
+            acs_media_streaming_websocket_path=f"{websocket_base_url_with_wss.rstrip('/')}{ACS_WEBSOCKET_PATH}",
         )
         if app.state.call_service is not None:
             app.state.service_health['acs'] = 'healthy'

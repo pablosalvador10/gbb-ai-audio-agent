@@ -64,7 +64,10 @@ async def realtime_ws(ws: WebSocket):
         session_id = ws.headers.get("x-ms-call-connection-id") or uuid.uuid4().hex[:8]
 
         redis_mgr = ws.app.state.redis
-        cm = ws.app.state.conversation_manager
+        cm = await ConversationManager.from_redis(
+            session_id=session_id,
+            redis_mgr=redis_mgr
+        )
         ws.state.cm = cm
         ws.state.session_id = session_id
         ws.state.lt = LatencyTool(cm)
