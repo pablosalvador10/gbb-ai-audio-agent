@@ -19,7 +19,7 @@ function start_frontend() {
     echo "Starting frontend in $FRONTEND_DIR"
     cd "$FRONTEND_DIR"
     npm install
-    npm run start
+    npm run dev
 }
 
 start_frontend

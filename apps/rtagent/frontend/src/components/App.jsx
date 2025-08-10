@@ -1496,4 +1496,3 @@ export default function RealTimeVoiceApp() {
     </div>
   );
 }
-

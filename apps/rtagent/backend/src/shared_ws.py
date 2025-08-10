@@ -64,6 +64,8 @@ async def send_tts_audio(
     try:
         synth: SpeechSynthesizer = ws.app.state.tts_client
         logger.debug("Synthesizing PCM for TTS...")
+        synth.start_speaking_text(text)
+     
         pcm_bytes = synth.synthesize_to_pcm(text=text, voice=VOICE_TTS, sample_rate=16000)
 
         if latency_tool:

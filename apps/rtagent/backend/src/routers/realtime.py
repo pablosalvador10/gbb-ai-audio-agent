@@ -222,14 +222,14 @@ async def realtime_ws(ws: WebSocket):
     """
     try:
         await ws.accept()
-        session_id = ws.headers.get("x-ms-call-connection-id") or uuid.uuid4().hex[:8]
+        session_id = uuid.uuid4().hex[:8]
 
         redis_mgr = ws.app.state.redis
         cm = MemoManager.from_redis(session_id, redis_mgr)
         ws.state.cm = cm
         ws.state.session_id = session_id
         ws.state.lt = LatencyTool(cm)
-        ws.state.is_synthesizing = False  # IMPORTANT: your TTS path must toggle this True/False
+        ws.state.is_synthesizing = False  
         ws.state.user_buffer = ""
 
         # Initialize VAD for this session
@@ -275,7 +275,6 @@ async def realtime_ws(ws: WebSocket):
         while True:
             msg = await ws.receive()  # can be text or bytes
             if msg.get("type") == "websocket.receive" and msg.get("bytes") is not None:
-                # >>> VAD-GATED INGESTION <<< #
                 try:
                     ws.state.vad_gate.process_bytes(msg["bytes"])
                 except Exception as e:
