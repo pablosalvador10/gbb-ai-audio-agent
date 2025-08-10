@@ -72,47 +72,111 @@ async def send_tts_audio(
 
     try:
         synth: SpeechSynthesizer = ws.app.state.tts_client
-        logger.debug("Synthesizing PCM for TTS...")
-        logger.info(f"is_synthesizing from speaking {ws.state.is_synthesizing}")
+        logger.debug("Synthesizing audio for TTS...")
+        logger.info(f"is_synthesizing flag set: {ws.state.is_synthesizing}")
         
         # Use provided voice or fall back to global setting
         tts_voice = voice or GREETING_VOICE_TTS
         logger.debug(f"Using voice: {tts_voice}")
         
-        synth.start_speaking_text(text)
-        pcm_bytes = synth.synthesize_to_pcm(text=text, voice=tts_voice, sample_rate=16000)
-
+        # Check for cancellation before synthesis
+        if getattr(ws.state, "tts_cancel", False):
+            logger.info("TTS canceled before synthesis started")
+            return
+        
+        # For browser/realtime: use synthesize_to_pcm and convert to WAV in memory
+        logger.info("Synthesizing high-quality audio for browser playback...")
+        
+        # Get raw PCM at 24kHz (good quality for browser)
+        pcm_bytes = synth.synthesize_to_pcm(text=text, voice=tts_voice, sample_rate=24000)
+        
+        # Check for cancellation after synthesis
+        if getattr(ws.state, "tts_cancel", False):
+            logger.info("TTS canceled after synthesis, skipping transmission")
+            return
+        
+        # Create proper WAV header for the PCM data
+        import struct
+        import io
+        
+        # WAV file parameters
+        sample_rate = 24000
+        bits_per_sample = 16
+        channels = 1
+        byte_rate = sample_rate * channels * bits_per_sample // 8
+        block_align = channels * bits_per_sample // 8
+        data_size = len(pcm_bytes)
+        file_size = 36 + data_size
+        
+        # Create WAV file in memory
+        wav_buffer = io.BytesIO()
+        
+        # WAV header
+        wav_buffer.write(b'RIFF')                          # Chunk ID
+        wav_buffer.write(struct.pack('<L', file_size))     # File size - 8
+        wav_buffer.write(b'WAVE')                          # Format
+        wav_buffer.write(b'fmt ')                          # Subchunk1 ID
+        wav_buffer.write(struct.pack('<L', 16))            # Subchunk1 size
+        wav_buffer.write(struct.pack('<H', 1))             # Audio format (PCM)
+        wav_buffer.write(struct.pack('<H', channels))      # Number of channels
+        wav_buffer.write(struct.pack('<L', sample_rate))   # Sample rate
+        wav_buffer.write(struct.pack('<L', byte_rate))     # Byte rate
+        wav_buffer.write(struct.pack('<H', block_align))   # Block align
+        wav_buffer.write(struct.pack('<H', bits_per_sample)) # Bits per sample
+        wav_buffer.write(b'data')                          # Subchunk2 ID
+        wav_buffer.write(struct.pack('<L', data_size))     # Subchunk2 size
+        wav_buffer.write(pcm_bytes)                        # Audio data
+        
+        wav_bytes = wav_buffer.getvalue()
+        
         if latency_tool:
             latency_tool.stop("tts:synthesis", ws.app.state.redis)
-
-        frames = SpeechSynthesizer.split_pcm_to_base64_frames(pcm_bytes, sample_rate=16000)
-        logger.debug("Prepared %d frames for WebSocket transmission", len(frames))
-
-        for i, frame in enumerate(frames):
-            # Cooperative cancel: VAD sets ws.state.tts_cancel=True on barge-in
-            if getattr(ws.state, "tts_cancel", False):
-                logger.info("TTS canceled mid-stream (barge-in); dropping remaining frames")
-                break
-            if ws.client_state != WebSocketState.CONNECTED:
-                logger.warning("WebSocket disconnected during audio transmission")
-                break
-
-            try:
-                await ws.send_json(
-                    {
-                        "type": "audio_data",
-                        "data": frame,
-                        "frame_index": i,
-                        "total_frames": len(frames),
-                        "sample_rate": 16000,
-                        "is_final": i == len(frames) - 1,
-                    }
-                )
-            except Exception as e:
-                logger.error("Failed to send audio frame %d: %s", i, e)
-                break
-
-        logger.debug("TTS audio transmission completed")
+        
+        # Convert WAV to base64 for WebSocket transmission
+        wav_base64 = base64.b64encode(wav_bytes).decode('utf-8')
+        
+        # Send complete audio as single payload (much better for browsers)
+        try:
+            # Calculate audio duration for proper is_synthesizing timing
+            sample_rate = 24000
+            bytes_per_sample = 2  # 16-bit PCM
+            audio_duration_seconds = len(pcm_bytes) / (sample_rate * bytes_per_sample)
+            
+            await ws.send_json({
+                "type": "audio",
+                "format": "base64",
+                "data": wav_base64,
+                "mimeType": "audio/wav",
+                "voice": tts_voice,
+                "duration": audio_duration_seconds,
+                "text_preview": text[:50] + "..." if len(text) > 50 else text
+            })
+            logger.debug(f"Sent WAV audio to browser ({len(wav_bytes)} bytes, {sample_rate}Hz, {audio_duration_seconds:.2f}s)")
+            
+            # IMPORTANT: Keep is_synthesizing=True for the duration of audio playback
+            # Schedule flag reset after audio completes in browser
+            async def reset_synthesizing_after_playback():
+                # Add generous buffer: network latency + browser processing + actual playback
+                total_wait_time = audio_duration_seconds + 2.0  # Increased buffer for reliable timing
+                await asyncio.sleep(total_wait_time)
+                try:
+                    # Only reset if not already canceled by VAD
+                    if not getattr(ws.state, "tts_cancel", False):
+                        ws.state.is_synthesizing = False
+                        logger.info(f"✅ TTS playback completed naturally, is_synthesizing reset to False after {total_wait_time:.2f}s")
+                    else:
+                        logger.info("✅ TTS playback timer completed, but was already canceled by VAD")
+                except Exception as e:
+                    logger.warning(f"Error resetting is_synthesizing flag: {e}")
+            
+            # Don't reset is_synthesizing in finally block - let the timer handle it
+            asyncio.create_task(reset_synthesizing_after_playback())
+            
+        except Exception as e:
+            logger.error("Failed to send WAV audio to browser: %s", e)
+            # Reset flag immediately on error
+            ws.state.is_synthesizing = False
+            raise
 
     except Exception as e:
         logger.error("TTS synthesis failed: %s", e)
@@ -128,9 +192,9 @@ async def send_tts_audio(
         except Exception as send_error:
             logger.error("Failed to send error message to frontend: %s", send_error)
     finally:
-        # Always release flags
+        # Don't reset is_synthesizing here - let the timer handle it for proper VAD timing
+        # Only reset tts_cancel and latency tracking
         try:
-            ws.state.is_synthesizing = False
             ws.state.tts_cancel = False
         except Exception:
             pass

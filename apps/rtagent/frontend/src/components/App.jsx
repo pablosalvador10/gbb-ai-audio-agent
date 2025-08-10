@@ -98,6 +98,85 @@ const styles = {
     lineHeight: "1.3",
     opacity: 0.8,
   },
+
+  // Help button in top right corner
+  helpButton: {
+    position: "absolute",
+    top: "16px",
+    right: "16px",
+    width: "32px",
+    height: "32px",
+    borderRadius: "50%",
+    border: "1px solid #e2e8f0",
+    background: "#f8fafc",
+    color: "#64748b",
+    cursor: "pointer",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontSize: "14px",
+    transition: "all 0.2s ease",
+    zIndex: 1000,
+    boxShadow: "0 2px 8px rgba(0,0,0,0.05)",
+  },
+
+  helpButtonHover: {
+    background: "#f1f5f9",
+    color: "#334155",
+    boxShadow: "0 4px 12px rgba(0,0,0,0.1)",
+    transform: "scale(1.05)",
+  },
+
+  helpTooltip: {
+    position: "absolute",
+    top: "40px",
+    right: "0px",
+    background: "white",
+    border: "1px solid #e2e8f0",
+    borderRadius: "12px",
+    padding: "16px",
+    width: "280px",
+    boxShadow: "0 8px 32px rgba(0,0,0,0.12), 0 2px 8px rgba(0,0,0,0.08)",
+    fontSize: "12px",
+    lineHeight: "1.5",
+    color: "#334155",
+    zIndex: 1001,
+    opacity: 0,
+    transform: "translateY(-8px)",
+    pointerEvents: "none",
+    transition: "all 0.2s ease",
+  },
+
+  helpTooltipVisible: {
+    opacity: 1,
+    transform: "translateY(0px)",
+    pointerEvents: "auto",
+  },
+
+  helpTooltipTitle: {
+    fontSize: "13px",
+    fontWeight: "600",
+    color: "#1e293b",
+    marginBottom: "8px",
+    display: "flex",
+    alignItems: "center",
+    gap: "6px",
+  },
+
+  helpTooltipText: {
+    marginBottom: "12px",
+    color: "#64748b",
+  },
+
+  helpTooltipContact: {
+    fontSize: "11px",
+    color: "#67d8ef",
+    fontFamily: "monospace",
+    background: "#f8fafc",
+    padding: "4px 8px",
+    borderRadius: "6px",
+    border: "1px solid #e2e8f0",
+  },
   
   // Waveform section - blended design
   waveformSection: {
@@ -1078,6 +1157,104 @@ const AgentConfiguration = ({ agents, onAgentUpdate, isLoading, isVisible, onClo
 };
 
 /* ------------------------------------------------------------------ *
+ *  BACKEND HELP BUTTON COMPONENT
+ * ------------------------------------------------------------------ */
+const BackendHelpButton = () => {
+  const [isHovered, setIsHovered] = useState(false);
+  const [isClicked, setIsClicked] = useState(false);
+
+  const handleClick = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsClicked(!isClicked);
+  };
+
+  const handleMouseLeave = () => {
+    setIsHovered(false);
+  };
+
+  return (
+    <div 
+      style={{
+        width: '14px',
+        height: '14px',
+        borderRadius: '50%',
+        backgroundColor: isHovered ? '#3b82f6' : '#64748b',
+        color: 'white',
+        fontSize: '9px',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        cursor: 'pointer',
+        transition: 'all 0.2s ease',
+        fontWeight: '600',
+        position: 'relative',
+        flexShrink: 0
+      }}
+      onMouseEnter={() => setIsHovered(true)}
+      onMouseLeave={handleMouseLeave}
+      onClick={handleClick}
+    >
+      ?
+      <div style={{
+        visibility: (isHovered || isClicked) ? 'visible' : 'hidden',
+        opacity: (isHovered || isClicked) ? 1 : 0,
+        position: 'absolute',
+        bottom: '20px',
+        left: '0',
+        backgroundColor: 'rgba(0, 0, 0, 0.95)',
+        color: 'white',
+        padding: '12px',
+        borderRadius: '8px',
+        fontSize: '11px',
+        lineHeight: '1.4',
+        minWidth: '280px',
+        maxWidth: '320px',
+        boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+        zIndex: 10000,
+        transition: 'all 0.2s ease',
+        backdropFilter: 'blur(8px)'
+      }}>
+        <div style={{
+          fontSize: '12px',
+          fontWeight: '600',
+          color: '#67d8ef',
+          marginBottom: '8px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '6px'
+        }}>
+          🔧 Backend Status Monitor
+        </div>
+        <div style={{ marginBottom: '8px' }}>
+          Real-time health monitoring for all RTAgent backend services including Redis cache, Azure OpenAI, Speech Services, and Communication Services.
+        </div>
+        <div style={{ marginBottom: '8px' }}>
+          <strong>Status Colors:</strong><br/>
+          🟢 Healthy - All systems operational<br/>
+          🟡 Degraded - Some performance issues<br/>
+          🔴 Unhealthy - Service disruption
+        </div>
+        <div style={{ fontSize: '10px', color: '#94a3b8', fontStyle: 'italic' }}>
+          Auto-refreshes every 30 seconds • Click to expand for details
+        </div>
+        {isClicked && (
+          <div style={{
+            textAlign: 'center',
+            marginTop: '8px',
+            fontSize: '9px',
+            color: '#94a3b8',
+            fontStyle: 'italic'
+          }}>
+            Click ? again to close
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+/* ------------------------------------------------------------------ *
  *  LEGACY BACKEND INDICATOR (keeping for compatibility)
  * ------------------------------------------------------------------ */
 const BackendIndicator = ({ url, onConfigureClick }) => {
@@ -1326,6 +1503,7 @@ const BackendIndicator = ({ url, onConfigureClick }) => {
           backgroundColor: statusColor,
         }}></div>
         <span style={styles.backendLabel}>Backend Status</span>
+        <BackendHelpButton />
         <span style={{
           ...styles.expandIcon,
           transform: isExpanded ? "rotate(180deg)" : "rotate(0deg)",
@@ -2027,6 +2205,109 @@ const detectAgentFromMessage = (text) => {
   return 'Assistant'; // Default fallback
 };
 
+/* ------------------------------------------------------------------ *
+ *  HELP BUTTON COMPONENT
+ * ------------------------------------------------------------------ */
+const HelpButton = () => {
+  const [isHovered, setIsHovered] = useState(false);
+  const [isClicked, setIsClicked] = useState(false);
+
+  const handleClick = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsClicked(!isClicked);
+  };
+
+  const handleMouseLeave = () => {
+    setIsHovered(false);
+    // Only hide if not clicked
+    if (!isClicked) {
+      // Tooltip will hide via CSS
+    }
+  };
+
+  return (
+    <div 
+      style={{
+        ...styles.helpButton,
+        ...(isHovered ? styles.helpButtonHover : {})
+      }}
+      onMouseEnter={() => setIsHovered(true)}
+      onMouseLeave={handleMouseLeave}
+      onClick={handleClick}
+    >
+      ?
+      <div style={{
+        ...styles.helpTooltip,
+        ...((isHovered || isClicked) ? styles.helpTooltipVisible : {})
+      }}>
+        <div style={styles.helpTooltipTitle}>
+        </div>
+        <div style={{
+          ...styles.helpTooltipText,
+          color: '#dc2626',
+          fontWeight: '600',
+          fontSize: '12px',
+          marginBottom: '12px',
+          padding: '8px',
+          backgroundColor: '#fef2f2',
+          borderRadius: '4px',
+          border: '1px solid #fecaca'
+        }}>
+          This is a demo available for Microsoft employees only.
+        </div>
+        <div style={styles.helpTooltipTitle}>
+          🤖 RTAgent Demo
+        </div>
+        <div style={styles.helpTooltipText}>
+          RTAgent is an accelerator that delivers a friction-free, AI-driven voice experience—whether callers dial a phone number, speak to an IVR, or click "Call Me" in a web app. Built entirely on Azure services, it provides a low-latency stack that scales on demand while keeping the AI layer fully under your control.
+        </div>
+        <div style={styles.helpTooltipText}>
+          Design a single agent or orchestrate multiple specialist agents. The framework allows you to build your voice agent from scratch, incorporate memory, configure actions, and fine-tune your TTS and STT layers.
+        </div>
+        <div style={styles.helpTooltipText}>
+          🤔 <strong>How to use:</strong> Click the microphone to start speaking, or use the "Call Me" button to receive a phone call. Try different scenarios like claims intake, general questions, or authentication.
+        </div>
+        <div style={styles.helpTooltipText}>
+         📑 <a 
+            href="https://microsoft.sharepoint.com/sites/AutoAuth" 
+            target="_blank" 
+            rel="noopener noreferrer"
+            style={{
+              color: '#3b82f6',
+              textDecoration: 'underline'
+            }}
+          >
+            View Documentation
+          </a> for setup instructions and advanced features.
+        </div>
+        <div style={styles.helpTooltipText}>
+          📧 Questions or feedback? <a 
+            href="mailto:rtvoiceagent@microsoft.com?subject=RTAgent Feedback"
+            style={{
+              color: '#3b82f6',
+              textDecoration: 'underline'
+            }}
+          >
+            Contact the team
+          </a>
+        </div>
+        {isClicked && (
+          <div style={{
+            textAlign: 'center',
+            marginTop: '8px',
+            fontSize: '10px',
+            color: '#64748b',
+            fontStyle: 'italic'
+          }}>
+            Click ? again to close
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 const ChatBubble = ({ message }) => {
   const { speaker, text, isTool, streaming, agent } = message;
   const isUser = speaker === "User";
@@ -2113,9 +2394,307 @@ export default function RealTimeVoiceApp() {
   
   // Audio level tracking for reactive waveforms
   const [audioLevel, setAudioLevel] = useState(0);
-  // const [outputAudioLevel, setOutputAudioLevel] = useState(0);
+  const [outputAudioLevel, setOutputAudioLevel] = useState(0);
   const audioLevelRef = useRef(0);
-  // const outputAudioLevelRef = useRef(0);
+  const outputAudioLevelRef = useRef(0);
+  
+  // Audio playback control
+  const currentSourceRef = useRef(null);
+
+  // Audio playback context and queue
+  const audioPlaybackContextRef = useRef(null);
+  const audioQueueRef = useRef([]);
+  const isPlayingRef = useRef(false);
+  
+  // VAD (Voice Activity Detection) for interruptions
+  const vadThresholdRef = useRef(0.05); // Threshold for detecting speech
+  const vadDebounceRef = useRef(null);
+  const lastInterruptionTimeRef = useRef(0);
+  const isProcessingQueueRef = useRef(false); // Lock to prevent concurrent processing
+  
+  // Monitor input audio level for VAD interruptions
+  useEffect(() => {
+    // When user audio level exceeds threshold while assistant is speaking, interrupt
+    if (audioLevel > vadThresholdRef.current && isPlayingRef.current && activeSpeaker === "Assistant") {
+      const now = Date.now();
+      // Debounce interruptions (prevent rapid firing)
+      if (now - lastInterruptionTimeRef.current > 500) {
+        console.log("VAD interruption detected - user speaking while assistant active");
+        hardStopPlayback("vad_interruption");
+        lastInterruptionTimeRef.current = now;
+        
+        // Optional: Send interruption signal to backend
+        if (socketRef.current?.readyState === WebSocket.OPEN) {
+          socketRef.current.send(JSON.stringify({ 
+            type: "user_interruption", 
+            reason: "vad",
+            audio_level: audioLevel 
+          }));
+        }
+      }
+    }
+  }, [audioLevel, activeSpeaker]);
+
+  // Hard stop playback and clear queue
+  const hardStopPlayback = (reason = "cancel") => {
+    try {
+      audioQueueRef.current = [];     // flush queued audio
+      if (currentSourceRef.current) {
+        currentSourceRef.current.stop(0); // immediate stop
+        currentSourceRef.current.disconnect();
+        currentSourceRef.current = null;
+      }
+    } catch (e) {
+      console.warn("hardStopPlayback error:", e);
+    } finally {
+      isPlayingRef.current = false;
+      isProcessingQueueRef.current = false; // Release processing lock
+      setOutputAudioLevel(0);
+      setActiveSpeaker(null);
+      
+      // Log different interruption types
+      if (reason === "vad_interruption") {
+        console.log("🎙️ Audio interrupted by user speech");
+      } else if (reason === "server_cancel") {
+        console.log("🔇 Audio cancelled by server");
+      } else {
+        console.log(`🛑 Audio stopped: ${reason}`);
+      }
+    }
+  };
+
+  // Initialize audio playback context
+  const initAudioPlayback = async () => {
+    if (!audioPlaybackContextRef.current) {
+      try {
+        audioPlaybackContextRef.current = new (window.AudioContext || window.webkitAudioContext)({
+          sampleRate: 24000 // Common TTS output sample rate
+        });
+        
+        // Resume context if it's suspended (browser policy)
+        if (audioPlaybackContextRef.current.state === 'suspended') {
+          await audioPlaybackContextRef.current.resume();
+        }
+        
+        console.log("Audio playback context initialized:", audioPlaybackContextRef.current.sampleRate);
+      } catch (error) {
+        console.error("Failed to initialize audio playback context:", error);
+      }
+    }
+  };
+
+  // Convert PCM bytes to AudioBuffer and play (now deprecated - use queueAudio instead)
+  const playAudioFromBytes = async (audioBytes, sampleRate = 24000) => {
+    console.warn("playAudioFromBytes is deprecated, use queueAudio for consistent behavior");
+    // Redirect to queue system for consistency
+    queueAudio(audioBytes, sampleRate);
+  };
+
+  // Queue audio for sequential playback with improved collision detection
+  const queueAudio = (audioBytes, sampleRate = 24000) => {
+    // Don't queue new audio if user is actively speaking (VAD detection)
+    if (audioLevel > vadThresholdRef.current) {
+      console.log("Skipping audio queue - user is speaking");
+      return;
+    }
+    
+    audioQueueRef.current.push({ audioBytes, sampleRate });
+    console.log(`Queued audio (${audioQueueRef.current.length} in queue)`);
+    
+    if (!isPlayingRef.current) {
+      // Small delay to prevent rapid-fire queue processing
+      setTimeout(() => processAudioQueue(), 50);
+    }
+  };
+
+  // Process audio queue with better overlap prevention
+  const processAudioQueue = async () => {
+    // Prevent multiple concurrent queue processing and check for active playback
+    if (isProcessingQueueRef.current || isPlayingRef.current || audioQueueRef.current.length === 0) {
+      return;
+    }
+
+    // Lock to prevent concurrent processing
+    isProcessingQueueRef.current = true;
+
+    try {
+      const queueItem = audioQueueRef.current.shift();
+      
+      // Double-check user isn't speaking before processing
+      if (audioLevel > vadThresholdRef.current) {
+        console.log("Skipping queued audio - user is speaking");
+        return;
+      }
+      
+      // Ensure we have audio context
+      await initAudioPlayback();
+      const audioContext = audioPlaybackContextRef.current;
+      
+      if (!audioContext) {
+        console.error("No audio context available for queue processing");
+        return;
+      }
+
+      if (queueItem.type === 'decoded') {
+        // Already decoded AudioBuffer (from base64 WAV)
+        const audioBuffer = queueItem.audioBuffer;
+        
+        // Create source and play
+        const source = audioContext.createBufferSource();
+        source.buffer = audioBuffer;
+        currentSourceRef.current = source;
+        
+        // Add analyser for output level monitoring
+        const analyser = audioContext.createAnalyser();
+        analyser.fftSize = 256;
+        source.connect(analyser);
+        analyser.connect(audioContext.destination);
+        
+        // Set playing state BEFORE starting to prevent race conditions
+        isPlayingRef.current = true;
+        setActiveSpeaker("Assistant");
+        
+        source.onended = () => {
+          isPlayingRef.current = false;
+          setActiveSpeaker(null);
+          setOutputAudioLevel(0);
+          currentSourceRef.current = null;
+          isProcessingQueueRef.current = false; // Release lock
+          // Process next item in queue after a small delay
+          setTimeout(() => processAudioQueue(), 50);
+        };
+        
+        source.start();
+        
+        // Monitor output levels for visualization
+        const monitorOutputLevel = () => {
+          if (isPlayingRef.current && currentSourceRef.current === source) {
+            const dataArray = new Uint8Array(analyser.frequencyBinCount);
+            analyser.getByteFrequencyData(dataArray);
+            const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
+            setOutputAudioLevel(average / 255);
+            requestAnimationFrame(monitorOutputLevel);
+          } else {
+            setOutputAudioLevel(0);
+          }
+        };
+        monitorOutputLevel();
+        
+        console.log(`Playing queued audio: ${audioBuffer.duration.toFixed(2)}s`);
+        
+      } else {
+        // Raw bytes (PCM format) - use playAudioFromBytes but ensure no overlap
+        const { audioBytes, sampleRate } = queueItem;
+        
+        // Convert bytes to Int16Array (assuming 16-bit PCM)
+        const int16Array = new Int16Array(audioBytes);
+        
+        // Convert Int16 to Float32 for Web Audio API
+        const float32Array = new Float32Array(int16Array.length);
+        for (let i = 0; i < int16Array.length; i++) {
+          float32Array[i] = int16Array[i] / 32767.0; // Convert to [-1, 1] range
+        }
+        
+        // Create AudioBuffer
+        const audioBuffer = audioContext.createBuffer(1, float32Array.length, sampleRate);
+        audioBuffer.getChannelData(0).set(float32Array);
+        
+        // Create buffer source and play
+        const source = audioContext.createBufferSource();
+        source.buffer = audioBuffer;
+        currentSourceRef.current = source;
+        
+        // Add analyser for output level monitoring
+        const analyser = audioContext.createAnalyser();
+        analyser.fftSize = 256;
+        source.connect(analyser);
+        analyser.connect(audioContext.destination);
+        
+        // Set playing state BEFORE starting to prevent race conditions
+        isPlayingRef.current = true;
+        setActiveSpeaker("Assistant");
+        
+        source.onended = () => {
+          isPlayingRef.current = false;
+          setActiveSpeaker(null);
+          setOutputAudioLevel(0);
+          currentSourceRef.current = null;
+          isProcessingQueueRef.current = false; // Release lock
+          // Process next item in queue after a small delay
+          setTimeout(() => processAudioQueue(), 50);
+        };
+        
+        source.start();
+        
+        // Monitor output levels
+        const monitorOutput = () => {
+          if (isPlayingRef.current && currentSourceRef.current === source) {
+            const dataArray = new Uint8Array(analyser.frequencyBinCount);
+            analyser.getByteFrequencyData(dataArray);
+            let sum = 0;
+            for (let i = 0; i < dataArray.length; i++) {
+              sum += dataArray[i];
+            }
+            const level = (sum / dataArray.length) / 255.0;
+            setOutputAudioLevel(level);
+            requestAnimationFrame(monitorOutput);
+          } else {
+            setOutputAudioLevel(0);
+          }
+        };
+        monitorOutput();
+        
+        console.log(`Playing queued PCM audio: ${float32Array.length} samples at ${sampleRate}Hz`);
+      }
+    } catch (error) {
+      console.error("Error processing audio queue:", error);
+      isPlayingRef.current = false;
+      setActiveSpeaker(null);
+      setOutputAudioLevel(0);
+      currentSourceRef.current = null;
+    } finally {
+      // Always release the processing lock
+      if (!isPlayingRef.current) {
+        isProcessingQueueRef.current = false;
+        // Try to process next item after error
+        setTimeout(() => processAudioQueue(), 100);
+      }
+    }
+  };
+
+  // Alternative: Play audio from base64 encoded data
+  const playAudioFromBase64 = async (base64Data, mimeType = 'audio/wav') => {
+    try {
+      await initAudioPlayback();
+      const audioContext = audioPlaybackContextRef.current;
+      
+      // Convert base64 to ArrayBuffer
+      const binaryString = atob(base64Data);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      
+      // Decode audio data
+      const audioBuffer = await audioContext.decodeAudioData(bytes.buffer);
+      
+      // Instead of playing immediately, add to queue to prevent overlap
+      audioQueueRef.current.push({ 
+        audioBuffer,
+        type: 'decoded' // Mark this as already decoded
+      });
+      
+      // Process queue if not already playing
+      if (!isPlayingRef.current) {
+        processAudioQueue();
+      }
+      
+      console.log(`Queued base64 audio: ${audioBuffer.duration.toFixed(2)}s`);
+      
+    } catch (error) {
+      console.error("Error processing base64 audio:", error);
+    }
+  };
 
 
 
@@ -2185,6 +2764,13 @@ export default function RealTimeVoiceApp() {
           console.warn("Cleanup error:", e);
         }
       }
+      if (audioPlaybackContextRef.current) {
+        try { 
+          audioPlaybackContextRef.current.close(); 
+        } catch (e) {
+          console.warn("Audio playback cleanup error:", e);
+        }
+      }
       if (socketRef.current) {
         try { 
           socketRef.current.close(); 
@@ -2192,6 +2778,9 @@ export default function RealTimeVoiceApp() {
           console.warn("Cleanup error:", e);
         }
       }
+      // Clear audio queue
+      audioQueueRef.current = [];
+      isPlayingRef.current = false;
     };
   }, []);
 
@@ -2225,8 +2814,16 @@ export default function RealTimeVoiceApp() {
       socket.onmessage = handleSocketMessage;
       socketRef.current = socket;
 
-      // 2) setup Web Audio for raw PCM @16 kHz
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // 2) setup Web Audio for raw PCM @16 kHz with proper AEC
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          sampleRate: 16000,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
       micStreamRef.current = stream;
       const audioCtx = new (window.AudioContext || window.webkitAudioContext)({
         sampleRate: 16000
@@ -2330,15 +2927,26 @@ export default function RealTimeVoiceApp() {
     };
 
     const handleSocketMessage = async (event) => {
+      // Handle binary audio data - use queue system for consistent behavior
+      if (event.data instanceof ArrayBuffer) {
+        console.log("Received binary audio data:", event.data.byteLength, "bytes");
+        queueAudio(event.data); // Queue instead of direct playback
+        appendLog("🔊 Queued binary audio from backend");
+        return;
+      }
+      
+      // Handle Blob audio data - use queue system for consistent behavior
+      if (event.data instanceof Blob) {
+        console.log("Received blob audio data:", event.data.size, "bytes");
+        const arrayBuffer = await event.data.arrayBuffer();
+        queueAudio(arrayBuffer); // Queue instead of direct playback
+        appendLog("🔊 Queued blob audio from backend");
+        return;
+      }
+
+      // Handle string messages (JSON)
       if (typeof event.data !== "string") {
-        const ctx = new AudioContext();
-        const buf = await event.data.arrayBuffer();
-        const audioBuf = await ctx.decodeAudioData(buf);
-        const src = ctx.createBufferSource();
-        src.buffer = audioBuf;
-        src.connect(ctx.destination);
-        src.start();
-        appendLog("🔊 Audio played");
+        console.warn("Received unknown data type:", typeof event.data);
         return;
       }
     
@@ -2349,6 +2957,107 @@ export default function RealTimeVoiceApp() {
         appendLog("Ignored non‑JSON frame");
         return;
       }
+      
+      // Handle audio cancellation (interruption/barge-in)
+      if (payload.type === "audio_cancel") {
+        // stop immediately & flush queue
+        hardStopPlayback("server_cancel");
+        return;
+      }
+      
+      // Handle audio data in JSON payload
+      if (payload.type === "audio_data" && payload.data) {
+        try {
+          // Backend sends base64 PCM frames with metadata
+          const { data: base64Frame, frame_index, total_frames, sample_rate = 16000, is_final = false } = payload;
+          
+          // Convert base64 frame to ArrayBuffer
+          const binaryString = atob(base64Frame);
+          const bytes = new Uint8Array(binaryString.length);
+          for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+          }
+          
+          // Queue the audio frame for playback
+          queueAudio(bytes.buffer, sample_rate);
+          
+          console.log(`Queued audio frame ${frame_index + 1}/${total_frames} (${bytes.length} bytes)`);
+          
+          if (is_final) {
+            appendLog(`🔊 TTS audio completed (${total_frames} frames)`);
+          }
+        } catch (error) {
+          console.error("Error handling audio_data payload:", error);
+          appendLog("❌ Failed to play TTS audio frame");
+        }
+        return;
+      }
+      
+      // Handle legacy audio formats
+      if (payload.type === "audio" && payload.format === "base64") {
+        // ensure newer audio replaces older queued ones if desired
+        // Basic policy: if something is playing, queue; else play now
+        const startedSeq = payload.audio_seq ?? 0;
+
+        try {
+          // decode and play
+          await initAudioPlayback();
+          const ctx = audioPlaybackContextRef.current;
+          const binary = atob(payload.data);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+          ctx.decodeAudioData(bytes.buffer).then((buffer) => {
+            const source = ctx.createBufferSource();
+            source.buffer = buffer;
+            currentSourceRef.current = source;
+
+            // analyser for output meter (optional)
+            const analyser = ctx.createAnalyser();
+            analyser.fftSize = 256;
+            source.connect(analyser);
+            analyser.connect(ctx.destination);
+
+            const monitor = () => {
+              const data = new Uint8Array(analyser.frequencyBinCount);
+              analyser.getByteFrequencyData(data);
+              const avg = data.reduce((a, b) => a + b, 0) / data.length / 255.0;
+              outputAudioLevelRef.current = avg;
+              setOutputAudioLevel(avg);
+              if (isPlayingRef.current) requestAnimationFrame(monitor);
+            };
+
+            source.onended = () => {
+              isPlayingRef.current = false;
+              setOutputAudioLevel(0);
+              setActiveSpeaker(null);
+              currentSourceRef.current = null;
+              // ack playback end with the seq we were given
+              try {
+                socketRef.current?.send(JSON.stringify({ type: "audio_playback_ended", audio_seq: startedSeq }));
+              } catch {}
+              // process next queued item
+              processAudioQueue();
+            };
+
+            // start
+            isPlayingRef.current = true;
+            setActiveSpeaker("Assistant");
+            try {
+              socketRef.current?.send(JSON.stringify({ type: "audio_playback_started", audio_seq: startedSeq }));
+            } catch {}
+            source.start();
+            requestAnimationFrame(monitor);
+          });
+
+          appendLog("🔊 Playing base64 audio from backend");
+        } catch (error) {
+          console.error("Error handling audio payload:", error);
+          appendLog("❌ Failed to play audio from backend");
+        }
+        return;
+      }
+      
       // --- Handle relay/broadcast messages with {sender, message} ---
       if (payload.sender && payload.message) {
         // Route all relay messages through the same logic
@@ -2530,6 +3239,7 @@ export default function RealTimeVoiceApp() {
 
         {/* App Header */}
         <div style={styles.appHeader}>
+          <HelpButton />
           <div style={styles.appTitleContainer}>
             <div style={styles.appTitleWrapper}>
               <span style={styles.appTitleIcon}>🎙️</span>
@@ -2546,7 +3256,7 @@ export default function RealTimeVoiceApp() {
             isActive={recording} 
             speaker={activeSpeaker} 
             audioLevel={audioLevel}
-            outputAudioLevel={0}
+            outputAudioLevel={outputAudioLevel}
           />
           <div style={styles.sectionDivider}></div>
         </div>

@@ -409,7 +409,6 @@ async def get_agents_info(request: Request):
         )
 
 
-# Pydantic models for agent configuration updates
 class AgentModelUpdate(BaseModel):
     deployment_id: Optional[str] = None
     temperature: Optional[float] = None

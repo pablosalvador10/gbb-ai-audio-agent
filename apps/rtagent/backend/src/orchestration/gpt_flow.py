@@ -52,12 +52,9 @@ _STREAM_TRACING = (
     os.getenv("STREAM_TRACING", "false").lower() == "true"
 )  # High frequency ops
 
-
 # ---------------------------------------------------------------------------
 # Main entry-point
 # ---------------------------------------------------------------------------
-
-
 async def process_gpt_response(  # noqa: D401
     cm: "MemoManager",
     user_prompt: str,

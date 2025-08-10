@@ -710,8 +710,11 @@ class SpeechSynthesizer:
         voice: str = "en-US-JennyMultilingualNeural",
         sample_rate: int = 16000,
     ) -> bytes:
+        # Use provided voice or fall back to instance voice
+        target_voice = voice if voice != "en-US-JennyMultilingualNeural" else self.voice
+        
         speech_config = self.cfg
-        speech_config.speech_synthesis_voice_name = self.voice
+        speech_config.speech_synthesis_voice_name = target_voice
         speech_config.set_speech_synthesis_output_format(
             {
                 16000: speechsdk.SpeechSynthesisOutputFormat.Raw16Khz16BitMonoPcm,
@@ -721,9 +724,9 @@ class SpeechSynthesizer:
 
         ssml = f"""
 <speak version="1.0" xmlns:mstts="http://www.w3.org/2001/mstts" xml:lang="en-US">
-    <voice name="{voice}">
+    <voice name="{target_voice}">
         <prosody rate="15%" pitch="default">
-            {text}
+            {self._sanitize(text)}
         </prosody>
     </voice>
 </speak>"""

@@ -123,19 +123,48 @@ class VadGate:
         """
         now = self._now_ms()
         if now - self.last_barge_ms < BARGE_DEBOUNCE_MS:
+            logger.debug(f"TTS stop debounced: {now - self.last_barge_ms}ms < {BARGE_DEBOUNCE_MS}ms")
             return
         self.last_barge_ms = now
-        logger.info(f"is_synthesizing LALALA {self.ws.state.is_synthesizing}")
-        if getattr(self.ws.state, "is_synthesizing", False):
+        
+        is_synth_state = getattr(self.ws.state, "is_synthesizing", False)
+        logger.info(f"VAD barge-in check: is_synthesizing = {is_synth_state}")
+        
+        if is_synth_state:
             try:
-                self.ws.app.state.tts_client.stop_speaking()
+                logger.info("🛑 VAD: Stopping TTS due to user speech")
+                
+                # Set cancellation flags FIRST
+                self.ws.state.tts_cancel = True
                 self.ws.state.is_synthesizing = False
-                logger.info("🛑 TTS interrupted (VAD barge-in)")
+                
+                # Stop local speaker (for fallback)
+                self.ws.app.state.tts_client.stop_speaking()
+                
+                # Send cancellation message to frontend to stop audio playback
+                async def send_audio_cancel():
+                    try:
+                        await self.ws.send_json({
+                            "type": "audio_cancel",
+                            "reason": "user_speech_detected"
+                        })
+                        logger.info("🛑 Sent audio cancellation to frontend")
+                    except Exception as e:
+                        logger.error(f"Failed to send audio cancellation: {e}")
+                
+                # Schedule the cancellation message
+                import asyncio
+                asyncio.create_task(send_audio_cancel())
+                
+                logger.info("🛑 TTS interrupted (VAD barge-in) - flags reset and frontend notified")
             except Exception as e:  # pragma: no cover
                 logger.error("TTS stop failed: %s", e, exc_info=True)
+        else:
+            logger.info("VAD triggered but TTS not synthesizing, no action needed")
 
         # Drop a bit of mic->STT right after the barge to avoid feeding TTS tail to STT
         self.cooldown_until_ms = now + COOLDOWN_AFTER_BARGE_MS
+        logger.debug(f"VAD cooldown set until {self.cooldown_until_ms} (next {COOLDOWN_AFTER_BARGE_MS}ms)")
 
     def process_bytes(self, data: bytes) -> None:
         """
@@ -147,16 +176,20 @@ class VadGate:
 
         # Decide whether to forward to STT this chunk (half-duplex gating)
         push_ok = True
+        is_synth_state = getattr(self.ws.state, "is_synthesizing", False)
+        
         if (
-            getattr(self.ws.state, "is_synthesizing", False)
+            is_synth_state
             and not self.vad_started
             and now >= self.cooldown_until_ms
         ):
             # TTS speaking, no barge yet → mute STT feed
             push_ok = False
+            logger.debug(f"STT gated: TTS synthesizing={is_synth_state}, VAD started={self.vad_started}")
 
         if now < self.cooldown_until_ms:
             push_ok = False
+            logger.debug(f"STT gated: in cooldown for {self.cooldown_until_ms - now}ms")
 
         if push_ok:
             # forward to Azure STT
@@ -164,7 +197,7 @@ class VadGate:
                 self.ws.app.state.stt_client.write_bytes(data)
             except Exception as e:  # pragma: no cover
                 logger.warning("STT write_bytes failed: %s", e, exc_info=True)
-
+        
         # Always run local VAD on 32ms subframes
         for frame in self.framer.feed(data):
             x = _int16_to_float32(frame).unsqueeze(0)  # [1, T]
@@ -174,14 +207,15 @@ class VadGate:
                 logger.debug("VAD error (skipping frame): %s", e)
                 continue
 
-            if getattr(self.vad, "triggered", False) and not self.vad_started:
+            vad_triggered = getattr(self.vad, "triggered", False)
+            if vad_triggered and not self.vad_started:
                 self.vad_trigs += 1
                 if self.vad_trigs >= VAD_START_FRAMES:
                     self.vad_started = True
                     self.vad_trigs = 0
+                    logger.info(f"🎤 VAD started: user began speaking (triggered frames: {VAD_START_FRAMES})")
                     self._stop_tts_if_needed()
-                    logger.info(f"VAD started")
-            elif not getattr(self.vad, "triggered", False):
+            elif not vad_triggered:
                 self.vad_trigs = 0
 
             # END-of-speech: Silero returns a segment right after it decides "end"
@@ -189,7 +223,7 @@ class VadGate:
                 self.vad_started = False
                 # short hold before letting STT fully flow again
                 self.cooldown_until_ms = self._now_ms() + COOLDOWN_AFTER_END_MS
-                logger.info(f"VAD ended")
+                logger.info(f"🎤 VAD ended: user stopped speaking (cooldown: {COOLDOWN_AFTER_END_MS}ms)")
 
 # ======================== END VAD INTEGRATION ======================== #
 
@@ -239,21 +273,45 @@ async def realtime_ws(ws: WebSocket):
         cm.append_to_history(auth_agent.name, "assistant", GREETING)
 
         # Mark synthesizing around TTS, so VAD can gate STT
-        await send_tts_audio(GREETING, ws, latency_tool=ws.state.lt, voice_name=GREETING_VOICE_TTS)
+        await send_tts_audio(GREETING, ws, latency_tool=ws.state.lt, voice=GREETING_VOICE_TTS)
 
         await cm.persist_to_redis_async(redis_mgr)
 
         # ---------------- STT callbacks ---------------- #
         def on_partial(txt: str, lang: str):
             logger.info(f"🗣️ User (partial) in {lang}: {txt}")
+            logger.info(f"is_synthesizing flag check: {getattr(ws.state, 'is_synthesizing', 'NOT_SET')}")
+            
             if PARTIAL_FALLBACK and ws.state.is_synthesizing:
                 # Optional fallback in case VAD missed the start
                 try:
-                    ws.app.state.tts_client.stop_speaking()
+                    logger.info("🛑 PARTIAL_FALLBACK triggered - stopping TTS")
+                    
+                    # Set cancellation flags FIRST
+                    ws.state.tts_cancel = True  
                     ws.state.is_synthesizing = False
-                    logger.info("🛑 TTS interrupted via STT partial (fallback)")
+                    
+                    # Stop local speaker (for fallback)
+                    ws.app.state.tts_client.stop_speaking()
+                    
+                    # Send cancellation message to frontend
+                    async def send_audio_cancel():
+                        try:
+                            await ws.send_json({
+                                "type": "audio_cancel", 
+                                "reason": "partial_fallback"
+                            })
+                            logger.info("🛑 Sent audio cancellation to frontend (PARTIAL_FALLBACK)")
+                        except Exception as e:
+                            logger.error(f"Failed to send audio cancellation: {e}")
+                    
+                    asyncio.create_task(send_audio_cancel())
+                    logger.info("🛑 TTS interrupted via STT partial (fallback) - frontend notified")
                 except Exception as e:
                     logger.error(f"Error stopping TTS: {e}", exc_info=True)
+            elif PARTIAL_FALLBACK and not ws.state.is_synthesizing:
+                logger.info("PARTIAL_FALLBACK enabled but TTS not synthesizing, continuing...")
+                
             asyncio.create_task(
                 ws.send_text(json.dumps({"type": "assistant_streaming", "content": txt}))
             )
@@ -287,7 +345,7 @@ async def realtime_ws(ws: WebSocket):
                     if check_for_stopwords(prompt):
                         goodbye = "Thank you for using our service. Goodbye."
                         await ws.send_text(json.dumps({"type": "exit", "message": goodbye}))
-                        await send_tts_audio(goodbye, ws, latency_tool=ws.state.lt)
+                        await send_tts_audio(goodbye, ws, latency_tool=ws.state.lt, voice=GREETING_VOICE_TTS)
                         break
 
                     # Orchestrate GPT+TTS; ensure is_synthesizing toggles are respected inside that flow
