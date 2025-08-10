@@ -252,6 +252,50 @@ const styles = {
     hyphens: "auto",
     whiteSpace: "pre-wrap",
   },
+
+  // Agent-specific color schemes
+  agentColors: {
+    AuthAgent: {
+      background: "#3b82f6", // Blue for authentication
+      shadow: "0 2px 8px rgba(59,130,246,0.3)",
+      icon: "🛡️"
+    },
+    FNOLIntakeAgent: {
+      background: "#ef4444", // Red for claims/emergency
+      shadow: "0 2px 8px rgba(239,68,68,0.3)", 
+      icon: "📋"
+    },
+    GeneralInfoAgent: {
+      background: "#10b981", // Green for general info
+      shadow: "0 2px 8px rgba(16,185,129,0.3)",
+      icon: "ℹ️"
+    },
+    Claims: {
+      background: "#ef4444", // Red for claims
+      shadow: "0 2px 8px rgba(239,68,68,0.3)",
+      icon: "📋"
+    },
+    General: {
+      background: "#10b981", // Green for general
+      shadow: "0 2px 8px rgba(16,185,129,0.3)",
+      icon: "ℹ️"
+    },
+    Auth: {
+      background: "#3b82f6", // Blue for auth
+      shadow: "0 2px 8px rgba(59,130,246,0.3)",
+      icon: "🛡️"
+    },
+    Assistant: {
+      background: "#67d8ef", // Default teal
+      shadow: "0 2px 8px rgba(103,216,239,0.3)",
+      icon: "🤖"
+    },
+    default: {
+      background: "#67d8ef", // Fallback to teal
+      shadow: "0 2px 8px rgba(103,216,239,0.3)",
+      icon: "🤖"
+    }
+  },
   
   // Control section - blended footer design
   controlSection: {
@@ -324,7 +368,7 @@ const styles = {
   },
   
 
-  // Backend status indicator - enhanced for component health - relocated to bottom left
+  // Backend status indicator - bottom left with responsive sizing to maintain separation
   backendIndicator: {
     position: "fixed",
     bottom: "20px",
@@ -464,18 +508,597 @@ styleSheet.textContent = `
       box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
     }
   }
+  
+  @keyframes slideDown {
+    from {
+      opacity: 0;
+      transform: translateY(-10px);
+      max-height: 0;
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+      max-height: 1000px;
+    }
+  }
 `;
 document.head.appendChild(styleSheet);
 
 /* ------------------------------------------------------------------ *
- *  BACKEND STATUS COMPONENT
+ *  IMPROVED AGENT CONFIGURATION COMPONENT
  * ------------------------------------------------------------------ */
-const BackendIndicator = ({ url }) => {
+const AgentConfiguration = ({ agents, onAgentUpdate, isLoading, isVisible, onClose }) => {
+  const [editingAgent, setEditingAgent] = useState(null);
+  const [localChanges, setLocalChanges] = useState({});
+
+  // Voice options from settings.py
+  const voiceOptions = {
+    "OpenAI/Turbo Voices": [
+      "en-US-AlloyTurboMultilingualNeural",
+      "en-US-EchoTurboMultilingualNeural", 
+      "en-US-FableTurboMultilingualNeural",
+      "en-US-OnyxTurboMultilingualNeural",
+      "en-US-NovaTurboMultilingualNeural",
+      "en-US-ShimmerTurboMultilingualNeural"
+    ],
+    "Standard Neural Voices": [
+      "en-US-AvaMultilingualNeural",
+      "en-US-AndrewMultilingualNeural",
+      "en-US-EmmaMultilingualNeural", 
+      "en-US-BrianMultilingualNeural",
+      "en-US-AvaNeural",
+      "en-US-AndrewNeural",
+      "en-US-EmmaNeural"
+    ],
+    "Premium HD Voices": [
+      "en-US-Ava:DragonHDLatestNeural",
+      "en-US-Andrew:DragonHDLatestNeural",
+      "en-US-Brian:DragonHDLatestNeural",
+      "en-US-Emma:DragonHDLatestNeural",
+      "en-US-Davis:DragonHDLatestNeural",
+      "en-US-Adam:DragonHDLatestNeural",
+      "en-US-Steffan:DragonHDLatestNeural"
+    ]
+  };
+
+  const modelOptions = [
+    "gpt-4o",
+    "gpt-4o-mini"
+  ];
+
+  const handleInputChange = (agentName, field, value) => {
+    setLocalChanges(prev => ({
+      ...prev,
+      [agentName]: {
+        ...prev[agentName],
+        [field]: value
+      }
+    }));
+  };
+
+  const handleSaveAgent = async (agentName) => {
+    const changes = localChanges[agentName];
+    if (changes) {
+      try {
+        // Convert frontend field names to backend API format
+        const apiChanges = {};
+        if (changes.model_name) {
+          apiChanges.model = { deployment_id: changes.model_name };
+        }
+        if (changes.voice_name) {
+          apiChanges.voice = { voice_name: changes.voice_name };
+        }
+        if (changes.temperature !== undefined) {
+          if (!apiChanges.model) apiChanges.model = {};
+          apiChanges.model.temperature = changes.temperature;
+        }
+
+        await onAgentUpdate(agentName, apiChanges);
+        setEditingAgent(null);
+        setLocalChanges(prev => {
+          const updated = { ...prev };
+          delete updated[agentName];
+          return updated;
+        });
+      } catch (error) {
+        console.error('Failed to update agent:', error);
+        alert(`Failed to update agent: ${error.message}`);
+      }
+    }
+  };
+
+  const handleCancelEdit = (agentName) => {
+    setEditingAgent(null);
+    setLocalChanges(prev => {
+      const updated = { ...prev };
+      delete updated[agentName];
+      return updated;
+    });
+  };
+
+  const handleSaveAllAndClose = async () => {
+    try {
+      // Save all pending changes
+      const agentsWithChanges = Object.keys(localChanges);
+      for (const agentName of agentsWithChanges) {
+        await handleSaveAgent(agentName);
+      }
+      // Close the configuration panel
+      onClose();
+    } catch (error) {
+      console.error('Failed to save all configurations:', error);
+      alert(`Failed to save configurations: ${error.message}`);
+    }
+  };
+
+  const getAgentColor = (agentName) => {
+    const colorMap = {
+      'AuthAgent': '#3b82f6',
+      'FNOLIntakeAgent': '#ef4444', 
+      'GeneralInfoAgent': '#10b981'
+    };
+    return colorMap[agentName] || '#6b7280';
+  };
+
+  const getAgentIcon = (agentName) => {
+    const iconMap = {
+      'AuthAgent': '�️',
+      'FNOLIntakeAgent': '📋', 
+      'GeneralInfoAgent': '💬'
+    };
+    return iconMap[agentName] || '🤖';
+  };
+
+  const getDisplayName = (agentName) => {
+    const displayNames = {
+      'AuthAgent': 'Authentication Agent',
+      'FNOLIntakeAgent': 'Claims Intake Agent', 
+      'GeneralInfoAgent': 'General Info Agent'
+    };
+    return displayNames[agentName] || agentName;
+  };
+
+  if (!isVisible) return null;
+
+  return (
+    <div style={{
+      background: 'linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%)',
+      border: '2px solid #e2e8f0',
+      borderRadius: '12px',
+      overflow: 'hidden',
+      maxWidth: '420px',
+      minWidth: '380px',
+      boxShadow: '0 6px 20px rgba(0,0,0,0.15)',
+      position: 'absolute',
+      bottom: '80px', // Position above backend status
+      left: '16px',
+      zIndex: 1001
+    }}>
+      {/* Header */}
+      <div style={{
+        padding: '14px 18px',
+        background: 'linear-gradient(135deg, #e2e8f0 0%, #cbd5e1 100%)',
+        borderBottom: '1px solid #cbd5e1',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between'
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <div style={{ fontSize: '20px' }}>⚙️</div>
+          <div>
+            <h3 style={{
+              margin: 0,
+              fontSize: '16px',
+              fontWeight: '600',
+              color: '#1e293b'
+            }}>
+              Agent Configuration
+            </h3>
+            <div style={{
+              fontSize: '11px',
+              color: '#64748b',
+              marginTop: '2px'
+            }}>
+              {agents?.length || 0} agents loaded
+            </div>
+          </div>
+        </div>
+        <div style={{
+          display: 'flex',
+          gap: '8px',
+          alignItems: 'center'
+        }}>
+          <button
+            onClick={handleSaveAllAndClose}
+            style={{
+              background: '#10b981',
+              color: 'white',
+              border: 'none',
+              borderRadius: '6px',
+              padding: '6px 12px',
+              fontSize: '12px',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '4px',
+              fontWeight: '500'
+            }}
+          >
+            💾 Save Configuration
+          </button>
+          <button
+            onClick={onClose}
+            style={{
+              background: '#ef4444',
+              color: 'white',
+              border: 'none',
+              borderRadius: '6px',
+              padding: '6px 12px',
+              fontSize: '12px',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '4px',
+              fontWeight: '500'
+            }}
+          >
+            ❌ Close
+          </button>
+        </div>
+      </div>
+
+      {/* Content */}
+      <div style={{
+        padding: '16px',
+        background: '#ffffff',
+        maxHeight: '400px',
+        overflowY: 'auto'
+      }}>
+        {isLoading ? (
+          <div style={{
+            textAlign: 'center',
+            padding: '32px 16px',
+            color: '#9ca3af'
+          }}>
+            <div style={{ fontSize: '28px', marginBottom: '10px' }}>🔄</div>
+            <div style={{ fontSize: '13px' }}>Loading agents...</div>
+          </div>
+        ) : agents && agents.length > 0 ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+            {agents.map((agent) => {
+              const isEditing = editingAgent === agent.name;
+              const hasChanges = localChanges[agent.name];
+              const currentValues = hasChanges 
+                ? { ...agent, ...localChanges[agent.name] }
+                : agent;
+
+              return (
+                <div 
+                  key={agent.name}
+                  style={{
+                    background: `linear-gradient(135deg, ${getAgentColor(agent.name)}08 0%, ${getAgentColor(agent.name)}03 100%)`,
+                    border: `2px solid ${getAgentColor(agent.name)}20`,
+                    borderRadius: '8px',
+                    padding: '14px',
+                    transition: 'all 0.3s ease',
+                    boxShadow: isEditing ? `0 4px 16px ${getAgentColor(agent.name)}20` : '0 2px 8px rgba(0,0,0,0.05)'
+                  }}
+                >
+                  {/* Agent Header */}
+                  <div style={{ 
+                    display: 'flex', 
+                    alignItems: 'flex-start', 
+                    justifyContent: 'space-between',
+                    marginBottom: '10px'
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', flex: 1 }}>
+                      <span style={{ fontSize: '18px', marginTop: '2px' }}>{getAgentIcon(agent.name)}</span>
+                      <div style={{ flex: 1 }}>
+                        <div style={{
+                          fontSize: '14px',
+                          fontWeight: '600',
+                          color: '#1e293b',
+                          marginBottom: '4px'
+                        }}>
+                          {getDisplayName(agent.name)}
+                        </div>
+                        {agent.description && (
+                          <div style={{
+                            fontSize: '11px',
+                            color: '#64748b',
+                            lineHeight: '1.4',
+                            marginBottom: '6px',
+                            maxWidth: '250px'
+                          }}>
+                            {agent.description}
+                          </div>
+                        )}
+                        <div style={{
+                          fontSize: '10px',
+                          color: '#64748b'
+                        }}>
+                          Status: <span style={{ color: '#10b981', fontWeight: '500' }}>Active</span>
+                          {agent.creator && <span> • By {agent.creator}</span>}
+                        </div>
+                      </div>
+                    </div>
+                    
+                    {/* Action Buttons */}
+                    <div style={{ display: 'flex', gap: '6px', marginLeft: '8px' }}>
+                      {!isEditing ? (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setEditingAgent(agent.name);
+                          }}
+                          style={{
+                            background: `${getAgentColor(agent.name)}`,
+                            color: 'white',
+                            border: 'none',
+                            borderRadius: '5px',
+                            padding: '6px 10px',
+                            fontSize: '10px',
+                            cursor: 'pointer',
+                            transition: 'all 0.2s ease',
+                            fontWeight: '500'
+                          }}
+                        >
+                          ✏️ Edit
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleSaveAgent(agent.name);
+                            }}
+                            style={{
+                              background: '#10b981',
+                              color: 'white',
+                              border: 'none',
+                              borderRadius: '5px',
+                              padding: '6px 10px',
+                              fontSize: '10px',
+                              cursor: 'pointer',
+                              fontWeight: '500'
+                            }}
+                          >
+                            💾 Save
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleCancelEdit(agent.name);
+                            }}
+                            style={{
+                              background: '#ef4444',
+                              color: 'white',
+                              border: 'none',
+                              borderRadius: '5px',
+                              padding: '6px 10px',
+                              fontSize: '10px',
+                              cursor: 'pointer',
+                              fontWeight: '500'
+                            }}
+                          >
+                            ❌ Cancel
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Configuration Fields - only show when editing */}
+                  {isEditing && (
+                    <div style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '12px',
+                      marginTop: '12px',
+                      padding: '12px',
+                      background: 'rgba(255,255,255,0.7)',
+                      borderRadius: '6px',
+                      border: '1px solid #e5e7eb'
+                    }}>
+                      {/* Model Selection */}
+                      <div>
+                        <label style={{
+                          display: 'block',
+                          fontSize: '12px',
+                          fontWeight: '600',
+                          color: '#374151',
+                          marginBottom: '4px'
+                        }}>
+                          🧠 Model Deployment
+                        </label>
+                        <select
+                          value={currentValues.model_name || agent.model?.deployment_id || ''}
+                          onChange={(e) => handleInputChange(agent.name, 'model_name', e.target.value)}
+                          style={{
+                            width: '100%',
+                            padding: '8px 10px',
+                            border: '1px solid #d1d5db',
+                            borderRadius: '5px',
+                            fontSize: '12px',
+                            background: 'white'
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          {modelOptions.map(model => (
+                            <option key={model} value={model}>{model}</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {/* Voice Selection */}
+                      <div>
+                        <label style={{
+                          display: 'block',
+                          fontSize: '12px',
+                          fontWeight: '600',
+                          color: '#374151',
+                          marginBottom: '4px'
+                        }}>
+                          🗣️ Voice Selection
+                        </label>
+                        <select
+                          value={currentValues.voice_name || agent.voice?.current_voice || ''}
+                          onChange={(e) => handleInputChange(agent.name, 'voice_name', e.target.value)}
+                          style={{
+                            width: '100%',
+                            padding: '8px 10px',
+                            border: '1px solid #d1d5db',
+                            borderRadius: '5px',
+                            fontSize: '11px',
+                            background: 'white'
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          {Object.entries(voiceOptions).map(([category, voices]) => (
+                            <optgroup key={category} label={category}>
+                              {voices.map(voice => (
+                                <option key={voice} value={voice}>
+                                  {voice.replace('en-US-', '').replace('MultilingualNeural', '').replace('TurboMultilingualNeural', ' (Turbo)').replace(':DragonHDLatestNeural', ' (HD)')}
+                                </option>
+                              ))}
+                            </optgroup>
+                          ))}
+                        </select>
+                      </div>
+
+                      {/* Temperature Control */}
+                      <div>
+                        <label style={{
+                          display: 'block',
+                          fontSize: '12px',
+                          fontWeight: '600',
+                          color: '#374151',
+                          marginBottom: '4px'
+                        }}>
+                          🌡️ Temperature ({currentValues.temperature || agent.model?.temperature || 0.7})
+                        </label>
+                        <input
+                          type="range"
+                          min="0"
+                          max="2"
+                          step="0.1"
+                          value={currentValues.temperature || agent.model?.temperature || 0.7}
+                          onChange={(e) => handleInputChange(agent.name, 'temperature', parseFloat(e.target.value))}
+                          style={{
+                            width: '100%',
+                            height: '6px',
+                            borderRadius: '3px',
+                            background: '#e5e7eb',
+                            outline: 'none',
+                            cursor: 'pointer'
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                        <div style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          fontSize: '10px',
+                          color: '#9ca3af',
+                          marginTop: '2px'
+                        }}>
+                          <span>Conservative</span>
+                          <span>Creative</span>
+                        </div>
+                      </div>
+
+                      {hasChanges && (
+                        <div style={{
+                          fontSize: '11px',
+                          color: '#f59e0b',
+                          background: '#fef3c7',
+                          padding: '4px 8px',
+                          borderRadius: '6px',
+                          textAlign: 'center',
+                          fontWeight: '500'
+                        }}>
+                          ⚠️ Unsaved changes
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  
+                  {/* Non-editing view - show current values */}
+                  {!isEditing && (
+                    <div style={{
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      gap: '8px',
+                      fontSize: '10px',
+                      color: '#6b7280',
+                      marginTop: '6px'
+                    }}>
+                      <span style={{
+                        background: '#f3f4f6',
+                        padding: '2px 6px',
+                        borderRadius: '4px',
+                        border: '1px solid #e5e7eb'
+                      }}>
+                        🧠 {agent.model?.deployment_id || 'Default'}
+                      </span>
+                      <span style={{
+                        background: '#f3f4f6',
+                        padding: '2px 6px',
+                        borderRadius: '4px',
+                        border: '1px solid #e5e7eb'
+                      }}>
+                        🗣️ {agent.voice?.current_voice?.replace('en-US-', '').replace('MultilingualNeural', '').replace('TurboMultilingualNeural', ' (Turbo)').replace(':DragonHDLatestNeural', ' (HD)') || 'Default'}
+                      </span>
+                      <span style={{
+                        background: '#f3f4f6',
+                        padding: '2px 6px',
+                        borderRadius: '4px',
+                        border: '1px solid #e5e7eb'
+                      }}>
+                        🌡️ {agent.model?.temperature || 0.7}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div style={{
+            textAlign: 'center',
+            padding: '32px 16px',
+            color: '#9ca3af'
+          }}>
+            <div style={{ fontSize: '36px', marginBottom: '10px' }}>🤖</div>
+            <div style={{ fontSize: '13px' }}>No agents configured</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+/* ------------------------------------------------------------------ *
+ *  LEGACY BACKEND INDICATOR (keeping for compatibility)
+ * ------------------------------------------------------------------ */
+const BackendIndicator = ({ url, onConfigureClick }) => {
   const [isConnected, setIsConnected] = useState(null);
   const [displayUrl, setDisplayUrl] = useState(url);
   const [readinessData, setReadinessData] = useState(null);
+  const [agentsData, setAgentsData] = useState(null);
   const [error, setError] = useState(null);
   const [isExpanded, setIsExpanded] = useState(false);
+  const [screenWidth, setScreenWidth] = useState(window.innerWidth);
+  const [showAgentConfig, setShowAgentConfig] = useState(false);
+  const [selectedAgent, setSelectedAgent] = useState(null);
+  const [configChanges, setConfigChanges] = useState({});
+  const [updateStatus, setUpdateStatus] = useState({});
+
+  // Track screen width for responsive positioning
+  useEffect(() => {
+    const handleResize = () => setScreenWidth(window.innerWidth);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
 
   // Check readiness endpoint
   const checkReadiness = async () => {
@@ -505,6 +1128,79 @@ const BackendIndicator = ({ url }) => {
     }
   };
 
+  // Check agents endpoint
+  const checkAgents = async () => {
+    try {
+      const response = await fetch(`${url}/agents`);
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+      
+      if (data.status === "success" && data.agents && Array.isArray(data.agents)) {
+        setAgentsData(data);
+      } else {
+        throw new Error("Invalid agents response structure");
+      }
+    } catch (err) {
+      console.error("Agents check failed:", err);
+      setAgentsData(null);
+    }
+  };
+
+  // Update agent configuration
+  const updateAgentConfig = async (agentName, config) => {
+    try {
+      setUpdateStatus({...updateStatus, [agentName]: 'updating'});
+      
+      const response = await fetch(`${url}/agents/${agentName}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(config),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+      
+      setUpdateStatus({...updateStatus, [agentName]: 'success'});
+      
+      // Refresh agents data
+      checkAgents();
+      
+      // Clear success status after 3 seconds
+      setTimeout(() => {
+        setUpdateStatus(prev => {
+          const newStatus = {...prev};
+          delete newStatus[agentName];
+          return newStatus;
+        });
+      }, 3000);
+      
+      return data;
+    } catch (err) {
+      console.error("Agent config update failed:", err);
+      setUpdateStatus({...updateStatus, [agentName]: 'error'});
+      
+      // Clear error status after 5 seconds
+      setTimeout(() => {
+        setUpdateStatus(prev => {
+          const newStatus = {...prev};
+          delete newStatus[agentName];
+          return newStatus;
+        });
+      }, 5000);
+      
+      throw err;
+    }
+  };
+
   useEffect(() => {
     // Parse and format the URL for display
     try {
@@ -527,9 +1223,13 @@ const BackendIndicator = ({ url }) => {
 
     // Initial check
     checkReadiness();
+    checkAgents();
 
     // Set up periodic checks every 30 seconds
-    const interval = setInterval(checkReadiness, 30000);
+    const interval = setInterval(() => {
+      checkReadiness();
+      checkAgents();
+    }, 30000);
 
     return () => clearInterval(interval);
   }, [url]);
@@ -553,6 +1253,47 @@ const BackendIndicator = ({ url }) => {
                      overallStatus === "degraded" ? "#f59e0b" :
                      overallStatus === "unhealthy" ? "#ef4444" : "#6b7280";
 
+  // Dynamic sizing based on screen width - keep in bottom left but adjust size to maintain separation
+  const getResponsiveStyle = () => {
+    const baseStyle = {
+      ...styles.backendIndicator,
+      transition: "all 0.3s ease",
+    };
+
+    // Calculate available space for the status box to avoid RTAgent overlap
+    const containerWidth = 768;
+    const containerLeftEdge = (screenWidth / 2) - (containerWidth / 2);
+    const availableWidth = containerLeftEdge - 40 - 20; // 40px margin from container, 20px from screen edge
+    
+    // Adjust size based on available space
+    if (availableWidth < 200) {
+      // Very narrow - compact size
+      return {
+        ...baseStyle,
+        minWidth: "150px",
+        maxWidth: "180px",
+        padding: !isExpanded && overallStatus === "healthy" ? "8px 12px" : "10px 14px",
+        fontSize: "10px",
+      };
+    } else if (availableWidth < 280) {
+      // Medium space - reduced size
+      return {
+        ...baseStyle,
+        minWidth: "180px",
+        maxWidth: "250px",
+        padding: !isExpanded && overallStatus === "healthy" ? "10px 14px" : "12px 16px",
+      };
+    } else {
+      // Plenty of space - full size
+      return {
+        ...baseStyle,
+        minWidth: !isExpanded && overallStatus === "healthy" ? "200px" : "280px",
+        maxWidth: "320px",
+        padding: !isExpanded && overallStatus === "healthy" ? "10px 14px" : "12px 16px",
+      };
+    }
+  };
+
   // Component icon mapping with descriptions
   const componentIcons = {
     redis: "💾",
@@ -573,13 +1314,7 @@ const BackendIndicator = ({ url }) => {
 
   return (
     <div 
-      style={{
-        ...styles.backendIndicator,
-        // Minimize when not expanded and healthy
-        minWidth: !isExpanded && overallStatus === "healthy" ? "200px" : "320px",
-        padding: !isExpanded && overallStatus === "healthy" ? "10px 14px" : "12px 16px",
-        transition: "all 0.3s ease",
-      }} 
+      style={getResponsiveStyle()} 
       title={`Click to expand backend status`}
       onClick={() => setIsExpanded(!isExpanded)}
       onMouseEnter={() => !isExpanded && setIsExpanded(true)}
@@ -794,6 +1529,311 @@ const BackendIndicator = ({ url }) => {
               <span title="Auto-refreshes every 30 seconds">🔄</span>
             </div>
           )}
+
+          {/* Agents Configuration Section */}
+          {isExpanded && agentsData?.agents && (
+            <div style={{
+              marginTop: "10px",
+              paddingTop: "10px",
+              borderTop: "2px solid #e2e8f0",
+            }}>
+              {/* Agents Header */}
+              <div style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                marginBottom: "8px",
+                padding: "6px 8px",
+                backgroundColor: "#f1f5f9",
+                borderRadius: "6px",
+              }}>
+                <div style={{
+                  fontWeight: "600",
+                  color: "#475569",
+                  fontSize: "11px",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "6px",
+                }}>
+                  🤖 RT Agents ({agentsData.agents.length})
+                </div>
+              </div>
+
+              {/* Agents List */}
+              <div style={{
+                display: "grid",
+                gridTemplateColumns: "1fr",
+                gap: "6px",
+                fontSize: "10px",
+              }}>
+                {agentsData.agents.map((agent, idx) => (
+                  <div 
+                    key={idx} 
+                    style={{
+                      padding: "8px 10px",
+                      border: "1px solid #e2e8f0",
+                      borderRadius: "6px",
+                      backgroundColor: "white",
+                      cursor: showAgentConfig ? "pointer" : "default",
+                      transition: "all 0.2s ease",
+                      ...(showAgentConfig && selectedAgent === agent.name ? {
+                        borderColor: "#3b82f6",
+                        backgroundColor: "#f0f9ff",
+                      } : {}),
+                    }}
+                    onClick={() => showAgentConfig && setSelectedAgent(selectedAgent === agent.name ? null : agent.name)}
+                    title={agent.description || `${agent.name} - Real-time voice agent`}
+                  >
+                    <div style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      marginBottom: "4px",
+                    }}>
+                      <div style={{
+                        fontWeight: "600",
+                        color: "#374151",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "6px",
+                      }}>
+                        <span style={{
+                          width: "8px",
+                          height: "8px",
+                          borderRadius: "50%",
+                          backgroundColor: agent.status === "loaded" ? "#10b981" : "#ef4444",
+                          display: "inline-block",
+                        }}></span>
+                        {agent.name}
+                      </div>
+                      <div style={{
+                        fontSize: "9px",
+                        color: "#64748b",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "6px",
+                      }}>
+                        {agent.model?.deployment_id && (
+                          <span title={`Model: ${agent.model.deployment_id}`}>
+                            💭 {agent.model.deployment_id.replace('gpt-', '')}
+                          </span>
+                        )}
+                        {agent.voice?.current_voice && (
+                          <span title={`Voice: ${agent.voice.current_voice}`}>
+                            🔊 {agent.voice.current_voice.split('-').pop()?.replace('Neural', '')}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    
+                    {/* Agent Configuration Panel */}
+                    {showAgentConfig && selectedAgent === agent.name && (
+                      <div style={{
+                        marginTop: "8px",
+                        paddingTop: "8px",
+                        borderTop: "1px solid #e2e8f0",
+                      }}>
+                        {/* Model Configuration */}
+                        <div style={{
+                          marginBottom: "8px",
+                        }}>
+                          <label style={{
+                            fontSize: "9px",
+                            fontWeight: "600",
+                            color: "#374151",
+                            display: "block",
+                            marginBottom: "3px",
+                          }}>
+                            Model Settings:
+                          </label>
+                          <div style={{
+                            display: "grid",
+                            gridTemplateColumns: "1fr 1fr",
+                            gap: "4px",
+                          }}>
+                            <input
+                              type="text"
+                              placeholder="Deployment ID"
+                              defaultValue={agent.model?.deployment_id || ""}
+                              onChange={(e) => {
+                                const newChanges = {...configChanges};
+                                if (!newChanges[agent.name]) newChanges[agent.name] = {};
+                                if (!newChanges[agent.name].model) newChanges[agent.name].model = {};
+                                newChanges[agent.name].model.deployment_id = e.target.value;
+                                setConfigChanges(newChanges);
+                              }}
+                              style={{
+                                fontSize: "9px",
+                                padding: "2px 4px",
+                                border: "1px solid #d1d5db",
+                                borderRadius: "3px",
+                                backgroundColor: "white",
+                                outline: "none",
+                              }}
+                            />
+                            <input
+                              type="number"
+                              step="0.1"
+                              min="0"
+                              max="2"
+                              placeholder="Temp"
+                              defaultValue={agent.model?.temperature || ""}
+                              onChange={(e) => {
+                                const newChanges = {...configChanges};
+                                if (!newChanges[agent.name]) newChanges[agent.name] = {};
+                                if (!newChanges[agent.name].model) newChanges[agent.name].model = {};
+                                newChanges[agent.name].model.temperature = parseFloat(e.target.value);
+                                setConfigChanges(newChanges);
+                              }}
+                              style={{
+                                fontSize: "9px",
+                                padding: "2px 4px",
+                                border: "1px solid #d1d5db",
+                                borderRadius: "3px",
+                                backgroundColor: "white",
+                                outline: "none",
+                              }}
+                            />
+                          </div>
+                        </div>
+
+                        {/* Voice Configuration */}
+                        <div style={{
+                          marginBottom: "8px",
+                        }}>
+                          <label style={{
+                            fontSize: "9px",
+                            fontWeight: "600",
+                            color: "#374151",
+                            display: "block",
+                            marginBottom: "3px",
+                          }}>
+                            Voice Settings:
+                          </label>
+                          <div style={{
+                            display: "grid",
+                            gridTemplateColumns: "2fr 1fr",
+                            gap: "4px",
+                          }}>
+                            <select
+                              defaultValue={agent.voice?.current_voice || ""}
+                              onChange={(e) => {
+                                const newChanges = {...configChanges};
+                                if (!newChanges[agent.name]) newChanges[agent.name] = {};
+                                if (!newChanges[agent.name].voice) newChanges[agent.name].voice = {};
+                                newChanges[agent.name].voice.voice_name = e.target.value;
+                                setConfigChanges(newChanges);
+                              }}
+                              style={{
+                                fontSize: "9px",
+                                padding: "2px 4px",
+                                border: "1px solid #d1d5db",
+                                borderRadius: "3px",
+                                backgroundColor: "white",
+                                outline: "none",
+                              }}
+                            >
+                              <option value="">Select Voice...</option>
+                              {agentsData.available_voices?.turbo_voices?.map(voice => (
+                                <option key={voice} value={voice}>{voice.replace('en-US-', '').replace('Turbo', '').replace('Multilingual', '').replace('Neural', '')}</option>
+                              ))}
+                              {agentsData.available_voices?.standard_voices?.map(voice => (
+                                <option key={voice} value={voice}>{voice.replace('en-US-', '').replace('Multilingual', '').replace('Neural', '')}</option>
+                              ))}
+                              {agentsData.available_voices?.hd_voices?.map(voice => (
+                                <option key={voice} value={voice}>{voice.replace('en-US-', '').replace(':DragonHDLatestNeural', ' HD')}</option>
+                              ))}
+                            </select>
+                            <select
+                              defaultValue={agent.voice?.voice_style || "conversational"}
+                              onChange={(e) => {
+                                const newChanges = {...configChanges};
+                                if (!newChanges[agent.name]) newChanges[agent.name] = {};
+                                if (!newChanges[agent.name].voice) newChanges[agent.name].voice = {};
+                                newChanges[agent.name].voice.voice_style = e.target.value;
+                                setConfigChanges(newChanges);
+                              }}
+                              style={{
+                                fontSize: "9px",
+                                padding: "2px 4px",
+                                border: "1px solid #d1d5db",
+                                borderRadius: "3px",
+                                backgroundColor: "white",
+                                outline: "none",
+                              }}
+                            >
+                              <option value="conversational">Casual</option>
+                              <option value="professional">Pro</option>
+                              <option value="friendly">Friendly</option>
+                              <option value="empathetic">Caring</option>
+                            </select>
+                          </div>
+                        </div>
+
+                        {/* Apply Button */}
+                        <div style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                        }}>
+                          <button
+                            onClick={async () => {
+                              const changes = configChanges[agent.name];
+                              if (!changes) return;
+                              
+                              try {
+                                await updateAgentConfig(agent.name, changes);
+                                // Clear changes after successful update
+                                const newChanges = {...configChanges};
+                                delete newChanges[agent.name];
+                                setConfigChanges(newChanges);
+                              } catch (err) {
+                                console.error('Failed to update agent config:', err);
+                              }
+                            }}
+                            disabled={!configChanges[agent.name] || updateStatus[agent.name] === 'updating'}
+                            style={{
+                              fontSize: "9px",
+                              padding: "3px 8px",
+                              backgroundColor: configChanges[agent.name] ? "#3b82f6" : "#e5e7eb",
+                              color: configChanges[agent.name] ? "white" : "#9ca3af",
+                              border: "none",
+                              borderRadius: "3px",
+                              cursor: configChanges[agent.name] ? "pointer" : "not-allowed",
+                              transition: "all 0.2s ease",
+                            }}
+                          >
+                            {updateStatus[agent.name] === 'updating' ? "Updating..." : "Apply Changes"}
+                          </button>
+                          
+                          {updateStatus[agent.name] && (
+                            <span style={{
+                              fontSize: "8px",
+                              color: updateStatus[agent.name] === 'success' ? "#10b981" : "#ef4444",
+                            }}>
+                              {updateStatus[agent.name] === 'success' ? "✓ Updated" : 
+                               updateStatus[agent.name] === 'error' ? "✗ Failed" : ""}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              {/* Agents Info Footer */}
+              <div style={{
+                fontSize: "8px",
+                color: "#94a3b8",
+                marginTop: "8px",
+                textAlign: "center",
+                fontStyle: "italic",
+              }}>
+                Runtime configuration • Changes require restart for persistence please contact rtvoiceagent@microsoft.com
+              </div>
+            </div>
+          )}
         </>
       )}
     </div>
@@ -802,7 +1842,7 @@ const BackendIndicator = ({ url }) => {
 /* ------------------------------------------------------------------ *
  *  WAVEFORM COMPONENT - SIMPLE & SMOOTH
  * ------------------------------------------------------------------ */
-const WaveformVisualization = ({ speaker, audioLevel = 0, outputAudioLevel = 0 }) => {
+const WaveformVisualization = ({ speaker, audioLevel = 0, outputAudioLevel = 0, currentAgent = 'Assistant' }) => {
   const [waveOffset, setWaveOffset] = useState(0);
   const [amplitude, setAmplitude] = useState(5);
   const animationRef = useRef();
@@ -896,7 +1936,8 @@ const WaveformVisualization = ({ speaker, audioLevel = 0, outputAudioLevel = 0 }
       baseColor = "#ef4444";
       opacity = 0.8;
     } else if (speaker === "Assistant") {
-      baseColor = "#67d8ef";
+      // Use standard assistant color instead of agent-specific colors
+      baseColor = "#67d8ef";    // Default cyan
       opacity = 0.8;
     } else {
       baseColor = "#3b82f6";
@@ -959,8 +2000,35 @@ const WaveformVisualization = ({ speaker, audioLevel = 0, outputAudioLevel = 0 }
 /* ------------------------------------------------------------------ *
  *  CHAT BUBBLE
  * ------------------------------------------------------------------ */
+// Helper function to detect agent from message content
+const detectAgentFromMessage = (text) => {
+  // Look for agent mentions in the message
+  if (text.includes('AuthAgent') || text.includes('authentication') || text.includes('verify') || text.includes('policy number')) {
+    return 'Auth';
+  }
+  if (text.includes('FNOLIntakeAgent') || text.includes('Claims') || text.includes('claim') || text.includes('incident') || text.includes('FNOL')) {
+    return 'Claims';
+  }
+  if (text.includes('GeneralInfoAgent') || text.includes('General') || text.includes('coverage') || text.includes('deductible')) {
+    return 'General';
+  }
+  
+  // Look for specific agent greetings
+  if (text.includes('Claims specialist') || text.includes('claim intake')) {
+    return 'Claims';
+  }
+  if (text.includes('General specialist') || text.includes('general information')) {
+    return 'General';
+  }
+  if (text.includes('authentication agent') || text.includes('verify your identity')) {
+    return 'Auth';
+  }
+  
+  return 'Assistant'; // Default fallback
+};
+
 const ChatBubble = ({ message }) => {
-  const { speaker, text, isTool, streaming } = message;
+  const { speaker, text, isTool, streaming, agent } = message;
   const isUser = speaker === "User";
   
   if (isTool) {
@@ -977,6 +2045,8 @@ const ChatBubble = ({ message }) => {
       </div>
     );
   }
+
+  // Remove agent-specific styling - use standard assistant bubble
   
   return (
     <div style={isUser ? styles.userMessage : styles.assistantMessage}>
@@ -1005,6 +2075,11 @@ export default function RealTimeVoiceApp() {
   const [callActive, setCallActive]   = useState(false);
   const [activeSpeaker, setActiveSpeaker] = useState(null);
   const [showPhoneInput, setShowPhoneInput] = useState(false);
+  const [currentAgent, setCurrentAgent] = useState('Assistant'); // Track current active agent
+
+  // Backend and Agent Configuration State
+  const [agentsData, setAgentsData] = useState(null);
+  const [isLoadingAgents, setIsLoadingAgents] = useState(false);
 
   // /* ---------- health monitoring ---------- */
   // const { 
@@ -1045,6 +2120,37 @@ export default function RealTimeVoiceApp() {
 
 
   const appendLog = m => setLog(p => `${p}\n${new Date().toLocaleTimeString()} - ${m}`);
+
+  /* ---------- Backend and Agent Data Functions ---------- */
+  const fetchAgentsData = async () => {
+    setIsLoadingAgents(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/agents`);
+      if (response.ok) {
+        const data = await response.json();
+        setAgentsData(data.agents || []);
+      } else {
+        setAgentsData([]);
+      }
+    } catch (error) {
+      console.error('Failed to fetch agents data:', error);
+      setAgentsData([]);
+    } finally {
+      setIsLoadingAgents(false);
+    }
+  };
+
+  // Fetch agents data on component mount
+  useEffect(() => {
+    fetchAgentsData();
+    
+    // Set up periodic refresh for agents
+    const interval = setInterval(() => {
+      fetchAgentsData();
+    }, 30000); // Refresh every 30 seconds
+
+    return () => clearInterval(interval);
+  }, []);
 
   /* ---------- scroll chat on new message ---------- */
   useEffect(()=>{
@@ -1267,11 +2373,18 @@ export default function RealTimeVoiceApp() {
       /* ---------- ASSISTANT STREAM ---------- */
       if (type === "assistant_streaming") {
         setActiveSpeaker("Assistant");
+        
+        // Detect agent from message content and update current agent
+        const detectedAgent = detectAgentFromMessage(txt);
+        if (detectedAgent !== 'Assistant') {
+          setCurrentAgent(detectedAgent);
+        }
+        
         setMessages(prev => {
           if (prev.at(-1)?.streaming) {
-            return prev.map((m,i)=> i===prev.length-1 ? {...m, text:txt} : m);
+            return prev.map((m,i)=> i===prev.length-1 ? {...m, text:txt, agent: currentAgent} : m);
           }
-          return [...prev, { speaker:"Assistant", text:txt, streaming:true }];
+          return [...prev, { speaker:"Assistant", text:txt, streaming:true, agent: currentAgent }];
         });
         return;
       }
@@ -1279,11 +2392,18 @@ export default function RealTimeVoiceApp() {
       /* ---------- ASSISTANT FINAL ---------- */
       if (msgType === "assistant" || msgType === "status" || speaker === "Assistant") {
         setActiveSpeaker("Assistant");
+        
+        // Detect agent from message content and update current agent
+        const detectedAgent = detectAgentFromMessage(txt);
+        if (detectedAgent !== 'Assistant') {
+          setCurrentAgent(detectedAgent);
+        }
+        
         setMessages(prev => {
           if (prev.at(-1)?.streaming) {
-            return prev.map((m,i)=> i===prev.length-1 ? {...m, text:txt, streaming:false} : m);
+            return prev.map((m,i)=> i===prev.length-1 ? {...m, text:txt, streaming:false, agent: currentAgent} : m);
           }
-          return pushIfChanged(prev, { speaker:"Assistant", text:txt });
+          return pushIfChanged(prev, { speaker:"Assistant", text:txt, agent: currentAgent });
         });
 
         appendLog("🤖 Assistant responded");
@@ -1433,7 +2553,14 @@ export default function RealTimeVoiceApp() {
 
         {/* Chat Messages */}
         <div style={styles.chatSection} ref={chatRef}>
-          <div style={styles.chatSectionIndicator}></div>
+          <div style={styles.chatSectionIndicator}>
+            <span style={{
+              fontSize: "12px",
+              fontWeight: "600",
+              color: "#64748b",
+            }}>
+            </span>
+          </div>
           <div style={styles.messageContainer} ref={messageContainerRef}>
             {messages.map((message, index) => (
               <ChatBubble key={index} message={message} />

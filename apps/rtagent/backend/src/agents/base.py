@@ -48,6 +48,11 @@ class RTAgent:
         self.top_p: float = float(m.get("top_p", 1.0))
         self.max_tokens: int = int(m.get("max_tokens", 4096))
 
+        # Voice configuration
+        v = self._cfg.get("voice", {})
+        self.voice_name: str = v.get("name", "en-US-AlloyTurboMultilingualNeural")
+        self.voice_style: str = v.get("style", "conversational")
+
         self.prompt_path: str = self._cfg.get("prompts", {}).get(
             "path", "voice_agent_authentication.jinja"
         )
@@ -97,6 +102,7 @@ class RTAgent:
             top_p=self.top_p,
             max_tokens=self.max_tokens,
             available_tools=self.tools,
+            agent_voice=self.voice_name,
         )
 
         return result

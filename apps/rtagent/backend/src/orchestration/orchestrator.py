@@ -74,13 +74,60 @@ def _cm_set(cm: "MemoManager", **kwargs: Dict[str, Any]) -> None:
         cm.update_corememory(k, v)
 
 
+def _get_agent_voice(ws: WebSocket, agent_name: str) -> str:
+    """Get the voice setting for a specific agent."""
+    try:
+        if agent_name == "Claims":
+            agent = getattr(ws.app.state, 'claim_intake_agent', None)
+        elif agent_name == "General":
+            agent = getattr(ws.app.state, 'general_info_agent', None)
+        elif agent_name == "Auth":
+            agent = getattr(ws.app.state, 'auth_agent', None)
+        else:
+            return None
+            
+        if agent and hasattr(agent, 'voice_name'):
+            return agent.voice_name
+            
+    except Exception as e:
+        logger.warning(f"Could not get voice for agent {agent_name}: {e}")
+    
+    return None
+
+
+def get_current_agent_voice(cm: "MemoManager", ws: WebSocket) -> str | None:
+    """Get the current active agent's voice from memory or agent config."""
+    # First try to get cached voice from memory
+    cached_voice = _cm_get(cm, "current_voice")
+    if cached_voice:
+        return cached_voice
+    
+    # Fallback to getting voice from current active agent
+    active_agent = _cm_get(cm, "active_agent")
+    if active_agent:
+        voice = _get_agent_voice(ws, active_agent)
+        if voice:
+            # Cache it for future use
+            _cm_set(cm, current_voice=voice)
+            return voice
+    
+    return None
+
+
 async def _send_agent_greeting(
-    cm: "MemoManager", ws: WebSocket, agent_name: str, is_acs: bool
+    cm: "MemoManager", ws: WebSocket, agent_name: str, is_acs: bool, agent_voice: str = None
 ) -> None:
     """Emit a greeting when switching to *agent_name*.
 
     A per‑session, per‑agent counter lives in ``ws.app.state.greet_counts`` so
     that subsequent returns use "Hi again…".
+    
+    Args:
+        cm: Memory manager
+        ws: WebSocket connection
+        agent_name: Name of the agent
+        is_acs: Whether this is an ACS call
+        agent_voice: Optional voice name to use for TTS
     """
 
     # Prevent duplicate greeting on consecutive turns.
@@ -127,13 +174,13 @@ async def _send_agent_greeting(
         logger.info("🎤 ACS greeting #%s for %s: %s", counter + 1, agent_name, greeting)
         await broadcast_message(ws.app.state.clients, greeting, "Assistant")
         try:
-             ws.app.state.handler.play_greeting(greeting_text=greeting)  # type: ignore[attr-defined]
+             ws.app.state.handler.play_greeting(greeting_text=greeting, voice=agent_voice)  # type: ignore[attr-defined]
         except AttributeError:
             logger.warning("Media handler lacks play_greeting(); sent text only.")
     else:
         logger.info("💬 WS greeting #%s for %s", counter + 1, agent_name)
         await ws.send_text(json.dumps({"type": "status", "message": greeting}))
-        await send_tts_audio(greeting, ws, latency_tool=ws.state.lt)
+        await send_tts_audio(greeting, ws, latency_tool=ws.state.lt, voice=agent_voice)
 
 
 @asynccontextmanager
@@ -168,9 +215,10 @@ async def run_auth_agent(
         result: Dict[str, Any] | Any = await auth_agent.respond(
             cm, utterance, ws, is_acs=is_acs
         )
-        logger.info("🚨 Auth result: %s", result)
+        logger.info("🚨 Auth result type: %s, value: %s", type(result).__name__, result)
 
     if isinstance(result, dict) and result.get("handoff") == "human_agent":
+        logger.info("🔀 Processing human_agent handoff...")
         reason = result.get("reason") or result.get("escalation_reason")
         _cm_set(
             cm,
@@ -183,14 +231,19 @@ async def run_auth_agent(
         )
         return  # session termination handled upstream
     
-    if result is not None: 
+    logger.info("🔍 Processing auth result - type: %s, is_dict: %s", type(result).__name__, isinstance(result, dict))
+    
+    if isinstance(result, dict) and result.get("authenticated"):
         caller_name: str | None = result.get("caller_name")
         policy_id: str | None = result.get("policy_id")
         claim_intent: str | None = result.get("claim_intent")
         topic: str | None = result.get("topic")
         intent: str = result.get("intent", "general")
         active_agent: str = "Claims" if intent == "claims" else "General"
-
+        
+        # Get the voice for the new agent immediately
+        agent_voice = _get_agent_voice(ws, active_agent)
+        
         _cm_set(
             cm,
             authenticated=True,
@@ -199,15 +252,20 @@ async def run_auth_agent(
             claim_intent=claim_intent,
             topic=topic,
             active_agent=active_agent,
+            current_voice=agent_voice,
         )
 
         logger.info(
-            "✅ Auth OK – session=%s caller=%s policy=%s → %s agent",
+            "✅ Auth OK – session=%s caller=%s policy=%s → %s agent (voice: %s)",
             cm.session_id,
             caller_name,
             policy_id,
             active_agent,
+            agent_voice,
         )
+
+        # Send greeting with the correct agent voice
+        await _send_agent_greeting(cm, ws, active_agent, is_acs, agent_voice)
 
 # -------------------------------------------------------------
 # 2.  Specialist agents
@@ -318,27 +376,33 @@ async def _process_tool_response(  # pylint: disable=too-complex
     # ─── Unified intent routing (post‑auth) ─────────────
     if intent in {"claims", "general"} and _cm_get(cm, "authenticated", False):
         new_agent: str = "Claims" if intent == "claims" else "General"
-        _cm_set(cm, active_agent=new_agent, claim_intent=claim_intent, topic=topic)
+        
+        # Get and store the new agent's voice immediately
+        agent_voice = _get_agent_voice(ws, new_agent)
+        _cm_set(cm, active_agent=new_agent, claim_intent=claim_intent, topic=topic, current_voice=agent_voice)
 
         if new_agent != prev_agent:
-            logger.info("🔀 Routed via intent → %s", new_agent)
-            await _send_agent_greeting(cm, ws, new_agent, is_acs)
+            logger.info("🔀 Routed via intent → %s (voice: %s)", new_agent, agent_voice)
+            await _send_agent_greeting(cm, ws, new_agent, is_acs, agent_voice)
         return  # Skip legacy hand‑off logic if present
 
     # ─── hand‑off (non‑auth transfers) ──────
     if handoff_type == "ai_agent" and target_agent:
         if "Claim" in target_agent:
             new_agent = "Claims"
-            _cm_set(cm, active_agent=new_agent, claim_intent=claim_intent)
+            agent_voice = _get_agent_voice(ws, new_agent)
+            _cm_set(cm, active_agent=new_agent, claim_intent=claim_intent, current_voice=agent_voice)
         else:
             new_agent = "General"
-            _cm_set(cm, active_agent=new_agent, topic=topic)
-        logger.info("🔀 Hand‑off → %s", new_agent)
+            agent_voice = _get_agent_voice(ws, new_agent)
+            _cm_set(cm, active_agent=new_agent, topic=topic, current_voice=agent_voice)
+        
+        logger.info("🔀 Hand‑off → %s (voice: %s)", new_agent, agent_voice)
         if new_agent != prev_agent:
-            await _send_agent_greeting(cm, ws, new_agent, is_acs)
+            await _send_agent_greeting(cm, ws, new_agent, is_acs, agent_voice)
 
     elif handoff_type == "human_agent":
-        _cm_set(cm, active_agent="HumanEscalation")
+        _cm_set(cm, active_agent="HumanEscalation", current_voice=None)
 
     # ─── 3. Claim intake completed ─────────────────────────────
     elif claim_success:
@@ -350,6 +414,13 @@ SPECIALIST_MAP: Dict[str, Callable[..., Any]] = {
     "General": run_general_agent,
     "Claims": run_claims_agent,
 }
+
+# Public exports
+__all__ = [
+    "route_turn",
+    "get_current_agent_voice",
+    "SPECIALIST_MAP",
+]
 
 
 # -------------------------------------------------------------
@@ -420,8 +491,9 @@ async def route_turn(
 
         await handler(cm, transcript, ws, is_acs=is_acs)
 
-    except Exception:  # pylint: disable=broad-exception-caught
-        logger.exception("💥 route_turn crash – session=%s", cm.session_id)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("💥 route_turn crash – session=%s – Exception: %s", cm.session_id, str(e))
+        logger.exception("💥 Full traceback for session=%s", cm.session_id)
         raise
     finally:
         # Ensure core‑memory is persisted even if a downstream component failed.

@@ -38,7 +38,7 @@ from rtagents.RTMedAgent.backend.settings import (
     RATE,
     SILENCE_DURATION_MS,
     VAD_THRESHOLD,
-    VOICE_TTS,
+    GREETING_VOICE_TTS,
 )
 from services import (
     AzureRedisManager,
@@ -75,7 +75,7 @@ async def on_startup() -> None:
 
     # Speech SDK
     app.state.stt_client = SpeechCoreTranslator()
-    app.state.tts_client = SpeechSynthesizer(voice=VOICE_TTS)
+    app.state.tts_client = SpeechSynthesizer(voice=GREETING_VOICE_TTS)
 
     # Redis connection
     app.state.redis = AzureRedisManager()

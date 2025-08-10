@@ -23,7 +23,7 @@ import numpy as np
 import torch
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from apps.rtagent.backend.settings import GREETING
+from apps.rtagent.backend.settings import GREETING, GREETING_VOICE_TTS
 from apps.rtagent.backend.src.helpers import check_for_stopwords, receive_and_filter
 from apps.rtagent.backend.src.latency.latency_tool import LatencyTool
 from apps.rtagent.backend.src.orchestration.orchestrator import route_turn
@@ -53,7 +53,7 @@ FRAME_BYTES: int = 1024             # 32ms @ 16kHz, mono, PCM16
 BARGE_DEBOUNCE_MS: int = 250        # don't spam stop_speaking()
 COOLDOWN_AFTER_BARGE_MS: int = 450  # drop STT bytes briefly after barge to absorb TTS tail
 COOLDOWN_AFTER_END_MS: int = 120    # brief hold after end before pushing STT again
-PARTIAL_FALLBACK: bool = False      # cut on partials too (optional, default off)
+PARTIAL_FALLBACK: bool = True      # cut on partials too (optional, default off)
 
 
 def _int16_to_float32(raw: bytes) -> torch.Tensor:
@@ -125,7 +125,7 @@ class VadGate:
         if now - self.last_barge_ms < BARGE_DEBOUNCE_MS:
             return
         self.last_barge_ms = now
-
+        logger.info(f"is_synthesizing LALALA {self.ws.state.is_synthesizing}")
         if getattr(self.ws.state, "is_synthesizing", False):
             try:
                 self.ws.app.state.tts_client.stop_speaking()
@@ -180,7 +180,7 @@ class VadGate:
                     self.vad_started = True
                     self.vad_trigs = 0
                     self._stop_tts_if_needed()
-                    logger.info("VAD start")
+                    logger.info(f"VAD started")
             elif not getattr(self.vad, "triggered", False):
                 self.vad_trigs = 0
 
@@ -189,10 +189,9 @@ class VadGate:
                 self.vad_started = False
                 # short hold before letting STT fully flow again
                 self.cooldown_until_ms = self._now_ms() + COOLDOWN_AFTER_END_MS
-                logger.info("VAD end")
+                logger.info(f"VAD ended")
 
 # ======================== END VAD INTEGRATION ======================== #
-
 
 @router.websocket("/ws/relay")
 async def relay_ws(ws: WebSocket):
@@ -240,9 +239,7 @@ async def realtime_ws(ws: WebSocket):
         cm.append_to_history(auth_agent.name, "assistant", GREETING)
 
         # Mark synthesizing around TTS, so VAD can gate STT
-        ws.state.is_synthesizing = True
-        await send_tts_audio(GREETING, ws, latency_tool=ws.state.lt)
-        ws.state.is_synthesizing = False
+        await send_tts_audio(GREETING, ws, latency_tool=ws.state.lt, voice_name=GREETING_VOICE_TTS)
 
         await cm.persist_to_redis_async(redis_mgr)
 
@@ -290,9 +287,7 @@ async def realtime_ws(ws: WebSocket):
                     if check_for_stopwords(prompt):
                         goodbye = "Thank you for using our service. Goodbye."
                         await ws.send_text(json.dumps({"type": "exit", "message": goodbye}))
-                        ws.state.is_synthesizing = True
                         await send_tts_audio(goodbye, ws, latency_tool=ws.state.lt)
-                        ws.state.is_synthesizing = False
                         break
 
                     # Orchestrate GPT+TTS; ensure is_synthesizing toggles are respected inside that flow

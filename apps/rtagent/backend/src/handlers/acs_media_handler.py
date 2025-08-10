@@ -246,8 +246,14 @@ class ACSMediaHandler:
     def play_greeting(
         self,
         greeting_text: str = GREETING,
+        voice: Optional[str] = None,
     ):
-        """Send a greeting message to ACS using TTS (CLIENT)."""
+        """Send a greeting message to ACS using TTS (CLIENT).
+        
+        Args:
+            greeting_text: Text to speak
+            voice: Optional voice name to use for TTS
+        """
         if self.enable_tracing:
             with tracer.start_as_current_span(
                 "acs_media_handler.play_greeting",
@@ -256,11 +262,11 @@ class ACSMediaHandler:
                     "greeting_playback", greeting_length=len(greeting_text)
                 ),
             ):
-                self._play_greeting_internal(greeting_text)
+                self._play_greeting_internal(greeting_text, voice)
         else:
-            self._play_greeting_internal(greeting_text)
+            self._play_greeting_internal(greeting_text, voice)
 
-    def _play_greeting_internal(self, greeting_text: str):
+    def _play_greeting_internal(self, greeting_text: str, voice: Optional[str] = None):
         try:
             self.playback_task = asyncio.create_task(
                 send_response_to_acs(
@@ -269,6 +275,7 @@ class ACSMediaHandler:
                     blocking=False,
                     latency_tool=self.latency_tool,
                     stream_mode=StreamMode.MEDIA,
+                    voice=voice,
                 )
             )
         except Exception as e:

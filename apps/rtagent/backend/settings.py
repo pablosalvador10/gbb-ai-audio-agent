@@ -14,10 +14,15 @@ from typing import List
 
 from dotenv import load_dotenv
 
+from samples.rtagents.rtmedagent.backend.settings import GREETING_VOICE_TTS
 from src.enums.stream_modes import StreamMode
+import yaml
 
 # Load environment variables from .env file
 load_dotenv(override=True)
+
+from utils.ml_logging import get_logger
+logger = get_logger("settings")
 
 AZURE_CLIENT_ID: str = os.getenv("AZURE_CLIENT_ID", "")
 AZURE_TENANT_ID: str = os.getenv("AZURE_TENANT_ID", "")
@@ -67,7 +72,6 @@ ACS_WEBSOCKET_PATH:     str = "/ws/call/stream"
 AZURE_COSMOS_CONNECTION_STRING: str = os.getenv("AZURE_COSMOS_CONNECTION_STRING", "")
 AZURE_COSMOS_DATABASE_NAME: str = os.getenv("AZURE_COSMOS_DATABASE_NAME", "")
 AZURE_COSMOS_COLLECTION_NAME: str = os.getenv("AZURE_COSMOS_COLLECTION_NAME", "")
-
 
 # ------------------------------------------------------------------------------
 # Azure Identity / Authentication
@@ -132,7 +136,43 @@ AGENT_GENERAL_INFO_CONFIG: str = (
 # ------------------------------------------------------------------------------
 # TTS behaviour
 # ------------------------------------------------------------------------------
-VOICE_TTS = "en-US-AlloyTurboMultilingualNeural" # "en-US-Ava:DragonHDLatestNeural"
+# Cache for loaded voices to avoid repeated file reads
+_voice_cache = {}
+
+# Load voice from agent config YAML file
+def get_agent_voice(agent_config_path: str) -> str:
+    """Extract voice from agent YAML configuration. Cached to avoid repeated file reads."""
+    # Return cached voice if already loaded
+    if agent_config_path in _voice_cache:
+        return _voice_cache[agent_config_path]
+    
+    try:
+        logger.info(f"Loading agent voice from: {agent_config_path}")
+        with open(agent_config_path, 'r', encoding='utf-8') as file:
+            agent_config = yaml.safe_load(file)
+            voice_config = agent_config.get('voice', {})
+            if isinstance(voice_config, dict):
+                voice_name = voice_config.get('voice_name') or voice_config.get('name')
+                if voice_name:
+                    _voice_cache[agent_config_path] = voice_name
+                    return voice_name
+            elif isinstance(voice_config, str):
+                _voice_cache[agent_config_path] = voice_config
+                return voice_config
+        logger.warning("No valid voice configuration found, using default")
+        _voice_cache[agent_config_path] = "en-US-AvaMultilingualNeural"
+        return "en-US-AvaMultilingualNeural"
+    except FileNotFoundError as e:
+        logger.error(f"Agent config file not found: {agent_config_path} - {e}")
+        _voice_cache[agent_config_path] = "en-US-AvaMultilingualNeural"
+        return "en-US-AvaMultilingualNeural"
+    except Exception as e:
+        logger.error(f"Failed to load voice from {agent_config_path}: {e}")
+        _voice_cache[agent_config_path] = "en-US-AvaMultilingualNeural"
+        return "en-US-AvaMultilingualNeural"
+
+# Get voice from environment variable or auth agent config
+GREETING_VOICE_TTS = get_agent_voice(AGENT_AUTH_CONFIG)
 # en-US-AvaMultilingualNeural4 (Female)
 # en-US-AndrewMultilingualNeural4 (Male)
 # en-US-EmmaMultilingualNeural4 (Female)

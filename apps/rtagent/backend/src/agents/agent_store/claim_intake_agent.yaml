@@ -17,6 +17,10 @@ model:
   top_p: 0.9
   max_tokens: 2024
 
+voice:
+  name: en-US-Andrew2:DragonHDLatestNeural # Voice for TTS output
+  style: conversational # Voice style (conversational, professional, friendly)
+
 prompts:
   path: fnol_intake_agent.jinja
 

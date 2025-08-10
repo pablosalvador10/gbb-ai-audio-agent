@@ -64,7 +64,7 @@ SILENCE_DURATION_MS: int = 1300  # Duration of silence to end speech detection
 # ------------------------------------------------------------------------------
 # TTS behaviour
 # ------------------------------------------------------------------------------
-VOICE_TTS = "en-US-JennyMultilingualNeural"
+GREETING_VOICE_TTS = "en-US-JennyMultilingualNeural"
 
 # ------------------------------------------------------------------------------
 STOP_WORDS: List[str] = ["goodbye", "exit", "see you later", "bye"]

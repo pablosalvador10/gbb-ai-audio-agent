@@ -19,7 +19,7 @@ from typing import Optional, Set
 from fastapi import WebSocket
 from fastapi.websockets import WebSocketState
 
-from apps.rtagent.backend.settings import ACS_STREAMING_MODE, VOICE_TTS
+from apps.rtagent.backend.settings import ACS_STREAMING_MODE, GREETING_VOICE_TTS
 from apps.rtagent.backend.src.latency.latency_tool import LatencyTool
 from apps.rtagent.backend.src.services.acs.acs_helpers import (
     broadcast_message,
@@ -34,10 +34,19 @@ logger = get_logger("shared_ws")
 
 
 async def send_tts_audio(
-    text: str, ws: WebSocket, latency_tool: Optional[LatencyTool] = None
+    text: str, 
+    ws: WebSocket, 
+    latency_tool: Optional[LatencyTool] = None,
+    voice: Optional[str] = None
 ) -> None:
     """
     Synthesize speech and send audio data to browser WebSocket client.
+
+    Args:
+        text: Text to synthesize
+        ws: WebSocket connection
+        latency_tool: Optional latency tracking tool
+        voice: Optional voice name to use (defaults to global GREETING_VOICE_TTS)
 
     Contract with VAD (cooperative cancel):
       - Sets ws.state.is_synthesizing = True while frames are being sent.
@@ -64,9 +73,14 @@ async def send_tts_audio(
     try:
         synth: SpeechSynthesizer = ws.app.state.tts_client
         logger.debug("Synthesizing PCM for TTS...")
+        logger.info(f"is_synthesizing from speaking {ws.state.is_synthesizing}")
+        
+        # Use provided voice or fall back to global setting
+        tts_voice = voice or GREETING_VOICE_TTS
+        logger.debug(f"Using voice: {tts_voice}")
+        
         synth.start_speaking_text(text)
-     
-        pcm_bytes = synth.synthesize_to_pcm(text=text, voice=VOICE_TTS, sample_rate=16000)
+        pcm_bytes = synth.synthesize_to_pcm(text=text, voice=tts_voice, sample_rate=16000)
 
         if latency_tool:
             latency_tool.stop("tts:synthesis", ws.app.state.redis)
@@ -134,9 +148,18 @@ async def send_response_to_acs(
     blocking: bool = False,
     latency_tool: Optional[LatencyTool] = None,
     stream_mode: StreamMode = ACS_STREAMING_MODE,
+    voice: Optional[str] = None,
 ) -> Optional[asyncio.Task]:
     """
     Synthesizes speech and sends it as audio data to the ACS WebSocket.
+
+    Args:
+        ws: WebSocket connection
+        text: Text to synthesize
+        blocking: Whether to block on completion
+        latency_tool: Optional latency tracking tool
+        stream_mode: Stream mode for ACS
+        voice: Optional voice name to use (defaults to global GREETING_VOICE_TTS)
 
     Adds latency tracking for TTS step.
     """
@@ -155,8 +178,12 @@ async def send_response_to_acs(
 
         try:
             # Add timeout and retry logic for TTS synthesis
+            # Use provided voice or fall back to global setting
+            tts_voice = voice or GREETING_VOICE_TTS
+            logger.debug(f"Using voice for ACS: {tts_voice}")
+            
             pcm_bytes = synth.synthesize_to_pcm(
-                text=text, voice=VOICE_TTS, sample_rate=16000
+                text=text, voice=tts_voice, sample_rate=16000
             )
             frames = SpeechSynthesizer.split_pcm_to_base64_frames(
                 pcm_bytes, sample_rate=16000

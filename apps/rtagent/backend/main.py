@@ -42,7 +42,6 @@ from apps.rtagent.backend.settings import (
     RECOGNIZED_LANGUAGE,
     SILENCE_DURATION_MS,
     VAD_SEMANTIC_SEGMENTATION,
-    VOICE_TTS,
     ENTRA_EXEMPT_PATHS,
     ENABLE_AUTH_VALIDATION
 )
@@ -93,7 +92,7 @@ async def lifespan(app: FastAPI):
         # Speech SDK
         span.set_attribute("startup.stage", "speech_sdk")
         # Speech SDK
-        app.state.tts_client = SpeechSynthesizer(voice=VOICE_TTS, playback="always")
+        app.state.tts_client = SpeechSynthesizer(playback="always")
         app.state.stt_client = StreamingSpeechRecognizerFromBytes(
             use_semantic_segmentation=VAD_SEMANTIC_SEGMENTATION,
             vad_silence_timeout_ms=SILENCE_DURATION_MS,

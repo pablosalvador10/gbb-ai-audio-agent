@@ -15,6 +15,10 @@ model:
   top_p: 0.9 # Top-p setting for response variability
   max_tokens: 1024 # Maximum number of tokens in response
 
+voice:
+  name: en-US-Ava:DragonHDLatestNeural # Voice for TTS output
+  style: conversational # Voice style (conversational, professional, friendly)
+
 prompts:
   path: voice_agent_authentication.jinja # imput prompt
 

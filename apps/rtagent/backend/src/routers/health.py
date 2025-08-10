@@ -4,6 +4,7 @@ from typing import Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from settings import (
     ACS_CONNECTION_STRING,
     ACS_ENDPOINT,
@@ -277,3 +278,238 @@ async def _check_rt_agents_fast(auth_agent, claim_intake_agent) -> Dict:
         "status": "healthy",
         "check_time_ms": round((time.time() - start) * 1000, 2),
     }
+
+
+@router.get("/agents")
+async def get_agents_info(request: Request):
+    """
+    Get information about loaded RT agents including their configuration,
+    model settings, and voice settings that can be modified.
+    """
+    start_time = time.time()
+    agents_info = []
+    
+    try:
+        # Get agents from app state
+        auth_agent = getattr(request.app.state, 'auth_agent', None)
+        claim_intake_agent = getattr(request.app.state, 'claim_intake_agent', None)
+        general_info_agent = getattr(request.app.state, 'general_info_agent', None)
+        
+        # Helper function to extract agent info
+        def extract_agent_info(agent, config_path: str = None):
+            if not agent:
+                return None
+                
+            try:
+                # Get voice setting from agent configuration
+                agent_voice = getattr(agent, 'voice_name', None)
+                agent_voice_style = getattr(agent, 'voice_style', 'conversational')
+                
+                # Fallback to global GREETING_VOICE_TTS if agent doesn't have voice configured
+                from settings import GREETING_VOICE_TTS
+                current_voice = agent_voice or GREETING_VOICE_TTS
+                
+                agent_info = {
+                    "name": getattr(agent, 'name', 'Unknown'),
+                    "status": "loaded",
+                    "creator": getattr(agent, 'creator', 'Unknown'),
+                    "organization": getattr(agent, 'organization', 'Unknown'),
+                    "description": getattr(agent, 'description', ''),
+                    "model": {
+                        "deployment_id": getattr(agent, 'model_id', 'Unknown'),
+                        "temperature": getattr(agent, 'temperature', 0.7),
+                        "top_p": getattr(agent, 'top_p', 1.0),
+                        "max_tokens": getattr(agent, 'max_tokens', 4096)
+                    },
+                    "voice": {
+                        "current_voice": current_voice,
+                        "voice_style": agent_voice_style,
+                        "voice_configurable": True,
+                        "is_per_agent_voice": bool(agent_voice)  # True if agent has its own voice
+                    },
+                    "config_path": config_path,
+                    "prompt_path": getattr(agent, 'prompt_path', 'Unknown'),
+                    "tools": [tool.get('function', {}).get('name', 'Unknown') for tool in getattr(agent, 'tools', [])],
+                    "modifiable_settings": {
+                        "model_deployment": True,
+                        "temperature": True,
+                        "voice_name": True,
+                        "voice_style": True,
+                        "max_tokens": True
+                    }
+                }
+                return agent_info
+            except Exception as e:
+                logger.warning(f"Error extracting agent info: {e}")
+                return {
+                    "name": getattr(agent, 'name', 'Unknown'),
+                    "status": "error",
+                    "error": str(e)
+                }
+        
+        # Extract info for each agent
+        if auth_agent:
+            from settings import AGENT_AUTH_CONFIG
+            agent_info = extract_agent_info(auth_agent, AGENT_AUTH_CONFIG)
+            if agent_info:
+                agents_info.append(agent_info)
+                
+        if claim_intake_agent:
+            from settings import AGENT_CLAIM_INTAKE_CONFIG
+            agent_info = extract_agent_info(claim_intake_agent, AGENT_CLAIM_INTAKE_CONFIG)
+            if agent_info:
+                agents_info.append(agent_info)
+                
+        if general_info_agent:
+            from settings import AGENT_GENERAL_INFO_CONFIG
+            agent_info = extract_agent_info(general_info_agent, AGENT_GENERAL_INFO_CONFIG)
+            if agent_info:
+                agents_info.append(agent_info)
+        
+        response_time = round((time.time() - start_time) * 1000, 2)
+        
+        return {
+            "status": "success",
+            "agents_count": len(agents_info),
+            "agents": agents_info,
+            "response_time_ms": response_time,
+            "available_voices": {
+                "turbo_voices": [
+                    "en-US-AlloyTurboMultilingualNeural",
+                    "en-US-EchoTurboMultilingualNeural", 
+                    "en-US-FableTurboMultilingualNeural",
+                    "en-US-OnyxTurboMultilingualNeural",
+                    "en-US-NovaTurboMultilingualNeural",
+                    "en-US-ShimmerTurboMultilingualNeural"
+                ],
+                "standard_voices": [
+                    "en-US-AvaMultilingualNeural",
+                    "en-US-AndrewMultilingualNeural",
+                    "en-US-EmmaMultilingualNeural",
+                    "en-US-BrianMultilingualNeural"
+                ],
+                "hd_voices": [
+                    "en-US-Ava:DragonHDLatestNeural",
+                    "en-US-Andrew:DragonHDLatestNeural",
+                    "en-US-Brian:DragonHDLatestNeural",
+                    "en-US-Emma:DragonHDLatestNeural"
+                ]
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting agents info: {e}")
+        return JSONResponse(
+            content={
+                "status": "error", 
+                "error": str(e),
+                "response_time_ms": round((time.time() - start_time) * 1000, 2)
+            },
+            status_code=500
+        )
+
+
+# Pydantic models for agent configuration updates
+class AgentModelUpdate(BaseModel):
+    deployment_id: Optional[str] = None
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    max_tokens: Optional[int] = None
+
+class AgentVoiceUpdate(BaseModel):
+    voice_name: Optional[str] = None
+    voice_style: Optional[str] = None
+
+class AgentConfigUpdate(BaseModel):
+    model: Optional[AgentModelUpdate] = None
+    voice: Optional[AgentVoiceUpdate] = None
+
+
+@router.put("/agents/{agent_name}")
+async def update_agent_config(agent_name: str, config: AgentConfigUpdate, request: Request):
+    """
+    Update configuration for a specific agent (model settings, voice, etc.).
+    Changes are applied to the runtime instance but not persisted to YAML files.
+    """
+    start_time = time.time()
+    
+    try:
+        # Get the agent instance from app state
+        agent = None
+        if agent_name.lower() in ['authagent', 'auth_agent', 'auth']:
+            agent = getattr(request.app.state, 'auth_agent', None)
+        elif agent_name.lower() in ['fnolintakeagent', 'claim_intake_agent', 'claim', 'fnol']:
+            agent = getattr(request.app.state, 'claim_intake_agent', None)
+        elif agent_name.lower() in ['generalinfoagent', 'general_info_agent', 'general']:
+            agent = getattr(request.app.state, 'general_info_agent', None)
+        
+        if not agent:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Agent '{agent_name}' not found. Available agents: auth, claim, general"
+            )
+        
+        updated_fields = []
+        
+        # Update model settings
+        if config.model:
+            if config.model.deployment_id is not None:
+                agent.model_id = config.model.deployment_id
+                updated_fields.append(f"deployment_id -> {config.model.deployment_id}")
+            
+            if config.model.temperature is not None:
+                if 0.0 <= config.model.temperature <= 2.0:
+                    agent.temperature = config.model.temperature
+                    updated_fields.append(f"temperature -> {config.model.temperature}")
+                else:
+                    raise HTTPException(status_code=400, detail="Temperature must be between 0.0 and 2.0")
+            
+            if config.model.top_p is not None:
+                if 0.0 <= config.model.top_p <= 1.0:
+                    agent.top_p = config.model.top_p
+                    updated_fields.append(f"top_p -> {config.model.top_p}")
+                else:
+                    raise HTTPException(status_code=400, detail="top_p must be between 0.0 and 1.0")
+            
+            if config.model.max_tokens is not None:
+                if 1 <= config.model.max_tokens <= 16384:
+                    agent.max_tokens = config.model.max_tokens
+                    updated_fields.append(f"max_tokens -> {config.model.max_tokens}")
+                else:
+                    raise HTTPException(status_code=400, detail="max_tokens must be between 1 and 16384")
+        
+        # Update voice settings per agent
+        if config.voice:
+            if config.voice.voice_name is not None:
+                agent.voice_name = config.voice.voice_name
+                updated_fields.append(f"voice_name -> {config.voice.voice_name}")
+                logger.info(f"Updated {agent.name} voice to: {config.voice.voice_name}")
+            
+            if config.voice.voice_style is not None:
+                agent.voice_style = config.voice.voice_style
+                updated_fields.append(f"voice_style -> {config.voice.voice_style}")
+                logger.info(f"Updated {agent.name} voice style to: {config.voice.voice_style}")
+        
+        response_time = round((time.time() - start_time) * 1000, 2)
+        
+        return {
+            "status": "success",
+            "agent_name": agent.name,
+            "updated_fields": updated_fields,
+            "message": f"Successfully updated {len(updated_fields)} settings for {agent.name}",
+            "response_time_ms": response_time,
+            "note": "Changes applied to runtime instance. Restart required for persistence."
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating agent config: {e}")
+        return JSONResponse(
+            content={
+                "status": "error",
+                "error": str(e),
+                "response_time_ms": round((time.time() - start_time) * 1000, 2)
+            },
+            status_code=500
+        )

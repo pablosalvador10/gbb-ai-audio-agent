@@ -23,7 +23,7 @@ from azure.core.messaging import CloudEvent
 from fastapi import HTTPException, WebSocket
 from fastapi.responses import JSONResponse
 
-from apps.rtagent.backend.settings import ACS_STREAMING_MODE, GREETING, VOICE_TTS
+from apps.rtagent.backend.settings import ACS_STREAMING_MODE, GREETING, GREETING_VOICE_TTS
 from apps.rtagent.backend.src.shared_ws import broadcast_message
 from src.enums.stream_modes import StreamMode
 from src.stateful.state_managment import MemoManager
@@ -745,7 +745,7 @@ class ACSHandler:
             if stream_mode == StreamMode.TRANSCRIPTION:
                 # Use ACS TTS for transcription mode
                 text_source = TextSource(
-                    text=greeting, source_locale="en-US", voice_name=VOICE_TTS
+                    text=greeting, source_locale="en-US", voice_name=GREETING_VOICE_TTS
                 )
                 call_conn = acs_caller.get_call_connection(cid)
                 call_conn.play_media(play_source=text_source)

@@ -72,6 +72,7 @@ async def process_gpt_response(  # noqa: D401
     available_tools: Optional[List[Dict[str, Any]]] = None,
     call_connection_id: Optional[str] = None,
     session_id: Optional[str] = None,
+    agent_voice: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Stream a chat completion, emitting TTS and handling tool calls.
 
@@ -180,7 +181,7 @@ async def process_gpt_response(  # noqa: D401
                             streaming,
                         )
                         await _emit_streaming_text(
-                            streaming, ws, is_acs, call_connection_id, session_id
+                            streaming, ws, is_acs, call_connection_id, session_id, agent_voice
                         )
                         final_chunks.append(streaming)
                         collected.clear()
@@ -194,7 +195,7 @@ async def process_gpt_response(  # noqa: D401
         if collected:
             pending = "".join(collected).strip()
             await _emit_streaming_text(
-                pending, ws, is_acs, call_connection_id, session_id
+                pending, ws, is_acs, call_connection_id, session_id, agent_voice
             )
             final_chunks.append(pending)
 
@@ -273,6 +274,7 @@ async def _emit_streaming_text(
     is_acs: bool,
     call_connection_id: Optional[str] = None,
     session_id: Optional[str] = None,
+    agent_voice: Optional[str] = None,
 ) -> None:  # noqa: D401,E501
     """Emit one assistant text chunk via either ACS or WebSocket + TTS."""
     with create_trace_context(
@@ -290,10 +292,10 @@ async def _emit_streaming_text(
         if is_acs:
             trace_ctx.set_attribute("output_channel", "acs")
             # Note: broadcast_message is handled separately for final responses to avoid duplication
-            await send_response_to_acs(ws, text, latency_tool=ws.state.lt)
+            await send_response_to_acs(ws, text, latency_tool=ws.state.lt, voice=agent_voice)
         else:
             trace_ctx.set_attribute("output_channel", "websocket_tts")
-            await send_tts_audio(text, ws, latency_tool=ws.state.lt)
+            await send_tts_audio(text, ws, latency_tool=ws.state.lt, voice=agent_voice)
             await ws.send_text(
                 json.dumps({"type": "assistant_streaming", "content": text})
             )
