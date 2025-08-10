@@ -212,7 +212,6 @@ async def run_auth_agent(
 # -------------------------------------------------------------
 # 2.  Specialist agents
 # -------------------------------------------------------------
-
 async def run_general_agent(
     cm: "MemoManager",
     utterance: str,

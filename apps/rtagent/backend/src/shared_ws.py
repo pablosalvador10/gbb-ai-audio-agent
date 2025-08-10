@@ -39,17 +39,23 @@ async def send_tts_audio(
     """
     Synthesize speech and send audio data to browser WebSocket client.
 
-    Uses the synthesizer cached on FastAPI `app.state.tts_client`.
-    Adds latency tracking for TTS step and sends audio frames to React frontend.
+    Contract with VAD (cooperative cancel):
+      - Sets ws.state.is_synthesizing = True while frames are being sent.
+      - Checks ws.state.tts_cancel each frame; VAD sets this True on barge-in.
+      - Always resets flags in finally.
     """
-    # Validate WebSocket connection
     if ws.client_state != WebSocketState.CONNECTED:
         logger.error("WebSocket is not connected, cannot send TTS audio")
         return
 
-    if not text or not text.strip():
+    text = (text or "").strip()
+    if not text:
         logger.warning("Empty text provided for TTS synthesis")
         return
+
+    # init per-call state
+    setattr(ws.state, "tts_cancel", False)
+    setattr(ws.state, "is_synthesizing", True)
 
     if latency_tool:
         latency_tool.start("tts")
@@ -57,34 +63,25 @@ async def send_tts_audio(
 
     try:
         synth: SpeechSynthesizer = ws.app.state.tts_client
-        ws.state.is_synthesizing = True  # type: ignore[attr-defined]
-        logger.info(f"Synthesizing text: {ws.state.is_synthesizing}...")
-        synth.start_speaking_text(text)
-
-        # Synthesize text to PCM bytes for browser playback
-        logger.debug(f"Synthesizing text: {text[:100]}...")
-        pcm_bytes = synth.synthesize_to_pcm(
-            text=text, voice=VOICE_TTS, sample_rate=16000
-        )
+        logger.debug("Synthesizing PCM for TTS...")
+        pcm_bytes = synth.synthesize_to_pcm(text=text, voice=VOICE_TTS, sample_rate=16000)
 
         if latency_tool:
             latency_tool.stop("tts:synthesis", ws.app.state.redis)
 
-        # Convert PCM to base64 frames for WebSocket transmission
-        frames = SpeechSynthesizer.split_pcm_to_base64_frames(
-            pcm_bytes, sample_rate=16000
-        )
+        frames = SpeechSynthesizer.split_pcm_to_base64_frames(pcm_bytes, sample_rate=16000)
+        logger.debug("Prepared %d frames for WebSocket transmission", len(frames))
 
-        logger.debug(f"Generated {len(frames)} audio frames for WebSocket transmission")
-
-        # Send audio frames to React frontend
         for i, frame in enumerate(frames):
+            # Cooperative cancel: VAD sets ws.state.tts_cancel=True on barge-in
+            if getattr(ws.state, "tts_cancel", False):
+                logger.info("TTS canceled mid-stream (barge-in); dropping remaining frames")
+                break
             if ws.client_state != WebSocketState.CONNECTED:
                 logger.warning("WebSocket disconnected during audio transmission")
                 break
 
             try:
-                # Send audio data in format expected by React frontend
                 await ws.send_json(
                     {
                         "type": "audio_data",
@@ -96,24 +93,36 @@ async def send_tts_audio(
                     }
                 )
             except Exception as e:
-                logger.error(f"Failed to send audio frame {i}: {e}")
+                logger.error("Failed to send audio frame %d: %s", i, e)
                 break
 
-        logger.debug("TTS audio transmission completed successfully")
+        logger.debug("TTS audio transmission completed")
 
     except Exception as e:
-        logger.error(f"TTS synthesis failed: {e}")
-        # Send error message to frontend
+        logger.error("TTS synthesis failed: %s", e)
+        # Send error message to frontend (best effort)
         try:
             await ws.send_json(
                 {
                     "type": "tts_error",
                     "error": str(e),
-                    "text": text[:100] + "..." if len(text) > 100 else text,
+                    "text": (text[:100] + "...") if len(text) > 100 else text,
                 }
             )
         except Exception as send_error:
-            logger.error(f"Failed to send error message to frontend: {send_error}")
+            logger.error("Failed to send error message to frontend: %s", send_error)
+    finally:
+        # Always release flags
+        try:
+            ws.state.is_synthesizing = False
+            ws.state.tts_cancel = False
+        except Exception:
+            pass
+        if latency_tool:
+            try:
+                latency_tool.stop("tts", ws.app.state.redis)
+            except Exception:
+                pass
 
 
 async def send_response_to_acs(

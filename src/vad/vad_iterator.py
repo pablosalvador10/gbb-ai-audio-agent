@@ -3,7 +3,6 @@ import copy
 import numpy as np
 import torch
 
-
 class VADIterator:
     def __init__(
         self,
