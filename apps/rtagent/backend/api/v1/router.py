@@ -6,7 +6,7 @@ Main router for API v1 endpoints.
 """
 
 from fastapi import APIRouter
-from .endpoints import calls, health, media, realtime
+from .endpoints import calls, health, media, realtime, sessions
 
 # Create v1 router
 v1_router = APIRouter(prefix="/api/v1")
@@ -16,6 +16,7 @@ v1_router = APIRouter(prefix="/api/v1")
 v1_router.include_router(health.router, prefix="/health", tags=["health"])
 v1_router.include_router(calls.router, prefix="/calls", tags=["Call Management"])
 v1_router.include_router(media.router, prefix="/media", tags=["Media Session"])
+v1_router.include_router(sessions.router, prefix="/sessions", tags=["Session Management"])
 v1_router.include_router(
     realtime.router, prefix="/realtime", tags=["Real-time Communication", "WebSocket"]
 )

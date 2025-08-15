@@ -1,6 +1,11 @@
 """
 voice_agent.main
-================
+======import os
+import time
+import asyncio
+import logging
+from datetime import datetime
+from contextlib import asynccontextmanager=====
 Entrypoint that stitches everything together:
 
 • config / CORS
@@ -30,6 +35,7 @@ logger = get_logger("main")
 import os
 import time
 import asyncio
+import logging
 from datetime import datetime
 from contextlib import asynccontextmanager
 
@@ -61,6 +67,7 @@ from apps.rtagent.backend.src.agents.prompt_store.prompt_manager import PromptMa
 
 # from apps.rtagent.backend.src.routers import router as api_router
 from apps.rtagent.backend.api.v1.router import v1_router
+from apps.rtagent.backend.api.v1.logging.ws_log_broadcaster import install_ws_logging
 from apps.rtagent.backend.src.services import (
     AzureRedisManager,
     CosmosDBMongoCoreManager,
@@ -272,6 +279,11 @@ def initialize_app():
     global app
     app = create_app()
     setup_app_middleware_and_routes(app)
+    
+    # Install WebSocket logging system for real-time log streaming
+    install_ws_logging(app, level=logging.DEBUG)
+    logger.info("✅ WebSocket logging system installed - logs available at /ws/logs")
+    
     return app
 
 
