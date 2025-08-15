@@ -66,7 +66,7 @@ ACS_CALL_INBOUND_PATH: str = "/api/v1/calls/answer"
 ACS_CALL_CALLBACK_PATH: str = "/api/v1/calls/callbacks"
 
 # V1 WebSocket Endpoints
-ACS_WEBSOCKET_PATH: str = "/api/v1/media/stream"
+ACS_WEBSOCKET_PATH: str = "/api/v1/production-media/stream"
 
 # Legacy Endpoint Configs
 # # API route fragments

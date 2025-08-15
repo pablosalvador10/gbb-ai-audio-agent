@@ -108,6 +108,10 @@ def setup_azure_monitor(logger_name: str = None):
                 "requests": {"enabled": True},
                 "urllib3": {"enabled": True},
             },
+            # Configure storage settings for high-volume telemetry
+            storage_directory=os.getenv("AZURE_MONITOR_STORAGE_DIR", "/tmp/azure_monitor"),
+            storage_max_size=int(os.getenv("AZURE_MONITOR_STORAGE_MAX_SIZE", "209715200")),  # 200MB default (was ~50MB)
+            storage_maintenance_period=int(os.getenv("AZURE_MONITOR_MAINTENANCE_PERIOD", "120")),  # 2 minutes
         )
 
         status_msg = "✅ Azure Monitor configured successfully"
@@ -205,6 +209,10 @@ def _retry_without_live_metrics(logger_name: str, connection_string: str):
                 "requests": {"enabled": True},
                 "urllib3": {"enabled": True},
             },
+            # Configure storage settings for high-volume telemetry (retry without live metrics)
+            storage_directory=os.getenv("AZURE_MONITOR_STORAGE_DIR", "/tmp/azure_monitor"),
+            storage_max_size=int(os.getenv("AZURE_MONITOR_STORAGE_MAX_SIZE", "209715200")),  # 200MB default
+            storage_maintenance_period=int(os.getenv("AZURE_MONITOR_MAINTENANCE_PERIOD", "120")),  # 2 minutes
         )
         logger.info(
             "✅ Azure Monitor configured successfully (live metrics disabled due to permissions)"

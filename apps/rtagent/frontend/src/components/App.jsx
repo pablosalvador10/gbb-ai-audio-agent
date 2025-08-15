@@ -1790,9 +1790,19 @@ function RealTimeVoiceApp() {
       setMessages([]);
       appendLog("🎤 PCM streaming started");
 
-      // 1) open WS
-      const socket = new WebSocket(`${WS_URL}/api/v1/realtime/conversation`);
+      // 1) open WS - using production endpoint for isolated call handling
+      // Generate unique call connection ID for production isolation
+      const callConnectionId = `web-call-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      
+      // Create WebSocket with call connection ID as query parameter for production isolation
+      const wsUrl = new URL(`${WS_URL}/api/v1/production-media/stream`);
+      wsUrl.searchParams.set('call_connection_id', callConnectionId);
+      
+      const socket = new WebSocket(wsUrl.toString());
       socket.binaryType = "arraybuffer";
+      
+      // Store call ID for debugging
+      appendLog(`🆔 Production Call ID: ${callConnectionId}`);
 
       socket.onopen = () => {
         appendLog("🔌 WS open");

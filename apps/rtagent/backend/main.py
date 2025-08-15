@@ -254,9 +254,18 @@ def setup_app_middleware_and_routes(app: FastAPI):
     # Include legacy routers for compatibility (maintain existing paths for backward compatibility)
     # app.include_router(api_router)
 
-    # Include new V1 API
-    app.include_router(v1_router)
+    # Include main V1 API router (contains /api/v1/calls/initiate and other endpoints)
+    app.include_router(v1_router, prefix="/api/v1")
 
+    # Include new V1 Production Media API
+    from apps.rtagent.backend.api.v1.endpoints.production_media import router as production_media_router
+
+    app.include_router(
+        production_media_router, 
+        prefix="/api/v1/production-media",
+        tags=["Production Media"]
+    )
+    
     # Include health endpoints at root level for frontend compatibility
     from apps.rtagent.backend.api.v1.endpoints import health
 

@@ -45,6 +45,7 @@ SERVICE_NAMES = {
 def create_span_attrs(
     component: str = "unknown",
     service: str = "unknown",
+    call_connection_id: Optional[str] = None,
     **kwargs,
 ) -> Dict[str, Any]:
     """Create generic span attributes with common fields.
@@ -58,6 +59,8 @@ def create_span_attrs(
         "service": service,
         "service.version": "1.0.0",
     }
+    if call_connection_id:
+        attrs["rt.call.connection_id"] = call_connection_id
     attrs.update({k: v for k, v in kwargs.items() if v is not None})
     return attrs
 

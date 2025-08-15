@@ -66,12 +66,15 @@ from azure.communication.callautomation import PhoneNumberIdentifier
 # Import V1 components
 from ..handlers.acs_media_lifecycle import ACSMediaHandler
 from ..dependencies.orchestrator import get_orchestrator
+from apps.rtagent.backend.src.utils.call_diagnostics import diagnostics
 
 logger = get_logger("api.v1.endpoints.media")
 tracer = trace.get_tracer(__name__)
 
-# Global registry to track active handlers per call connection ID
+# Thread-safe registry to track active handlers per call connection ID
+import threading
 _active_handlers = {}
+_handlers_lock = threading.RLock()
 
 router = APIRouter()
 
@@ -182,6 +185,13 @@ async def acs_media_stream(
 
         session_id = call_connection_id
         logger.info(f"✅ Call connection ID determined: {call_connection_id}")
+        
+        # Register call start for diagnostics
+        diagnostics.register_call_start(
+            call_connection_id, 
+            session_id, 
+            {'websocket_id': id(websocket), 'stream_mode': str(ACS_STREAMING_MODE)}
+        )
 
         # Start tracing with valid call connection ID
         with tracer.start_as_current_span(
@@ -262,6 +272,10 @@ async def acs_media_stream(
         if not isinstance(e, WebSocketDisconnect):
             raise
     finally:
+        # Register call end for diagnostics
+        if call_connection_id:
+            diagnostics.register_call_end(call_connection_id)
+            
         await _cleanup_websocket_resources(
             websocket, handler, call_connection_id, session_id
         )
@@ -302,10 +316,26 @@ async def _validate_websocket_auth(websocket: WebSocket) -> None:
         raise HTTPException(401, f"Authentication failed: {str(e)}")
 
 
+async def _cleanup_handler(call_connection_id: str) -> None:
+    """Thread-safe cleanup of handler from registry."""
+    with _handlers_lock:
+        if call_connection_id in _active_handlers:
+            handler = _active_handlers[call_connection_id]
+            try:
+                if handler.is_running:
+                    await handler.stop()
+                    logger.info(f"Stopped handler for call {call_connection_id}")
+            except Exception as e:
+                logger.error(f"Error stopping handler for call {call_connection_id}: {e}")
+            finally:
+                del _active_handlers[call_connection_id]
+                logger.info(f"Removed handler from registry: {call_connection_id}")
+
+
 async def _validate_call_connection(
     websocket: WebSocket, call_connection_id: str
 ) -> None:
-    """Validate that the call connection exists."""
+    """Validate that the call connection exists and is unique."""
     acs_caller = websocket.app.state.acs_caller
     call_connection = acs_caller.get_call_connection(call_connection_id)
 
@@ -313,6 +343,25 @@ async def _validate_call_connection(
         logger.warning(f"Call connection {call_connection_id} not found")
         await websocket.close(code=1000, reason="Call not found")
         raise HTTPException(404, f"Call connection {call_connection_id} not found")
+
+    # Check for concurrent handler conflicts
+    existing_call = diagnostics.check_for_conflicts(call_connection_id)
+    if existing_call:
+        logger.error(
+            f"🚨 CONCURRENT CALL CONFLICT DETECTED: {call_connection_id} "
+            f"is already being processed by session {existing_call['session_id']} "
+            f"on thread {existing_call['thread_id']} "
+            f"since {existing_call['start_time']}"
+        )
+    
+    with _handlers_lock:
+        if call_connection_id in _active_handlers:
+            existing_handler = _active_handlers[call_connection_id]
+            if existing_handler.is_running:
+                logger.warning(
+                    f"🚨 CONCURRENT CALL CONFLICT: Active handler exists for {call_connection_id}"
+                )
+                # This is the key issue - we should handle this more gracefully
 
     logger.info(f"Call connection validated: {call_connection_id}")
 
@@ -325,19 +374,20 @@ async def _create_media_handler(
 ):
     """Create appropriate media handler based on streaming mode."""
 
-    # Check if there's already an active handler for this call ID
-    if call_connection_id in _active_handlers:
-        existing_handler = _active_handlers[call_connection_id]
-        if existing_handler.is_running:
-            logger.warning(
-                f"⚠️ Handler already exists for call {call_connection_id}, stopping existing handler"
-            )
-            try:
-                await existing_handler.stop()
-            except Exception as e:
-                logger.error(f"Error stopping existing handler: {e}")
-        # Remove from registry regardless
-        del _active_handlers[call_connection_id]
+    # Thread-safe check and cleanup of existing handlers
+    with _handlers_lock:
+        if call_connection_id in _active_handlers:
+            existing_handler = _active_handlers[call_connection_id]
+            if existing_handler.is_running:
+                logger.warning(
+                    f"⚠️ Handler already exists for call {call_connection_id}, stopping existing handler"
+                )
+                try:
+                    await existing_handler.stop()
+                except Exception as e:
+                    logger.error(f"Error stopping existing handler: {e}")
+            # Remove from registry regardless
+            del _active_handlers[call_connection_id]
 
     redis_mgr = websocket.app.state.redis
 
@@ -356,20 +406,18 @@ async def _create_media_handler(
         logger.info(f"Creating new memory manager for {call_connection_id}")
         memory_manager = MemoManager(session_id=call_connection_id)
 
-    # Initialize latency tracking
+    # Initialize latency tracking on WebSocket state (call-scoped)
     websocket.state.lt = LatencyTool(memory_manager)
     websocket.state.lt.start("greeting_ttfb")
     websocket.state._greeting_ttfb_stopped = False
 
-    # Set up call context in app state
+    # Store call-specific state on WebSocket state instead of shared app.state
     target_phone_number = memory_manager.get_context("target_number")
     if target_phone_number:
-        websocket.app.state.target_participant = PhoneNumberIdentifier(
-            target_phone_number
-        )
+        websocket.state.target_participant = PhoneNumberIdentifier(target_phone_number)
 
-    websocket.app.state.cm = memory_manager
-    websocket.app.state.call_conn = websocket.app.state.acs_caller.get_call_connection(
+    websocket.state.cm = memory_manager
+    websocket.state.call_conn = websocket.app.state.acs_caller.get_call_connection(
         call_connection_id
     )
 
@@ -383,8 +431,9 @@ async def _create_media_handler(
             memory_manager=memory_manager,
             session_id=session_id,
         )
-        # Register the handler in the global registry
-        _active_handlers[call_connection_id] = handler
+        # Thread-safe registration of the handler
+        with _handlers_lock:
+            _active_handlers[call_connection_id] = handler
         logger.info("Created V1 ACS media handler for MEDIA mode")
         return handler
 
@@ -393,8 +442,9 @@ async def _create_media_handler(
         from apps.rtagent.backend.src.handlers import TranscriptionHandler
 
         handler = TranscriptionHandler(websocket, cm=memory_manager)
-        # Register the handler in the global registry
-        _active_handlers[call_connection_id] = handler
+        # Thread-safe registration of the handler
+        with _handlers_lock:
+            _active_handlers[call_connection_id] = handler
         logger.info("Created transcription handler for TRANSCRIPTION mode")
         return handler
     else:
@@ -565,12 +615,9 @@ async def _cleanup_websocket_resources(
                         Status(StatusCode.ERROR, f"Handler cleanup error: {e}")
                     )
 
-                # Remove handler from registry
-                if call_connection_id and call_connection_id in _active_handlers:
-                    del _active_handlers[call_connection_id]
-                    logger.debug(
-                        f"Removed handler for call {call_connection_id} from registry"
-                    )
+                # Thread-safe removal from registry
+                if call_connection_id:
+                    await _cleanup_handler(call_connection_id)
 
             span.set_status(Status(StatusCode.OK))
             log_with_context(
