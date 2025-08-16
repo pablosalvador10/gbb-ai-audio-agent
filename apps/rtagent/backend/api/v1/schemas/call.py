@@ -22,6 +22,11 @@ class CallInitiateRequest(BaseModel):
         description="Caller ID to display (optional, uses system default if not provided)",
         example="+1987654321",
     )
+    session_id: Optional[str] = Field(
+        None,
+        description="Session identifier to correlate call with browser tab/session",
+        example="sess_abc12345",
+    )
     context: Optional[Dict[str, Any]] = Field(
         default_factory=dict,
         description="Additional call context metadata",
@@ -38,6 +43,7 @@ class CallInitiateRequest(BaseModel):
             "example": {
                 "target_number": "+1234567890",
                 "caller_id": "+1987654321",
+                "session_id": "sess_abc12345",
                 "context": {"customer_id": "cust_12345", "department": "support"},
             }
         }

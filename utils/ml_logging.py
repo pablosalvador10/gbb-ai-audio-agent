@@ -10,7 +10,14 @@ from colorama import init as colorama_init
 from opentelemetry import trace
 from opentelemetry.sdk._logs import LoggingHandler
 
-from utils.telemetry_config import setup_azure_monitor
+# Only import telemetry if not disabled
+if os.getenv("DISABLE_TELEMETRY", "").lower() != "true":
+    try:
+        from utils.telemetry_config import setup_azure_monitor
+    except Exception:
+        setup_azure_monitor = None
+else:
+    setup_azure_monitor = None
 
 colorama_init(autoreset=True)
 
@@ -252,32 +259,36 @@ def get_logger(
         logger.setLevel(level or logging.INFO)
 
     is_production = os.environ.get("ENV", "dev").lower() == "prod"
+    telemetry_disabled = os.getenv("DISABLE_TELEMETRY", "").lower() == "true"
 
-    # Ensure Azure Monitor LoggingHandler is attached if not already present
-    has_azure_handler = any(isinstance(h, LoggingHandler) for h in logger.handlers)
-    if not has_azure_handler and os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING"):
-        try:
-            azure_handler = LoggingHandler(level=logging.INFO)
-            logger.addHandler(azure_handler)
-            logger.debug(f"Azure Monitor LoggingHandler attached to logger: {name}")
-        except Exception as e:
-            logger.debug(f"Failed to attach Azure Monitor handler: {e}")
+    # Only set up Azure Monitor if telemetry is not disabled
+    if not telemetry_disabled:
+        # Ensure Azure Monitor LoggingHandler is attached if not already present
+        has_azure_handler = any(isinstance(h, LoggingHandler) for h in logger.handlers)
+        if not has_azure_handler and os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING"):
+            try:
+                azure_handler = LoggingHandler(level=logging.INFO)
+                logger.addHandler(azure_handler)
+                logger.debug(f"Azure Monitor LoggingHandler attached to logger: {name}")
+            except Exception as e:
+                logger.debug(f"Failed to attach Azure Monitor handler: {e}")
 
-    # Add trace filter if not already present
-    has_trace_filter = any(isinstance(f, TraceLogFilter) for f in logger.filters)
-    if not has_trace_filter:
-        logger.addFilter(TraceLogFilter())
+        # Add trace filter if not already present
+        has_trace_filter = any(isinstance(f, TraceLogFilter) for f in logger.filters)
+        if not has_trace_filter:
+            logger.addFilter(TraceLogFilter())
 
     if include_stream_handler and not any(
         isinstance(h, logging.StreamHandler) for h in logger.handlers
     ):
-        if not has_azure_handler:
+        if not telemetry_disabled and not has_azure_handler:
             logger.debug(
                 "OTEL LoggingHandler not attached. Ensure configure_azure_monitor was called."
             )
         sh = logging.StreamHandler()
         sh.setFormatter(JsonFormatter() if is_production else PrettyFormatter())
-        sh.addFilter(TraceLogFilter())
+        if not telemetry_disabled:
+            sh.addFilter(TraceLogFilter())
         logger.addHandler(sh)
 
     return logger

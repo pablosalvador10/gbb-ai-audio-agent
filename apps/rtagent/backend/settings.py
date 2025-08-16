@@ -16,11 +16,11 @@ import yaml
 from dotenv import load_dotenv
 
 from src.enums.stream_modes import StreamMode
-from utils.ml_logging import get_logger
+import logging
 
 # Load environment variables from .env file
 load_dotenv(override=True)
-logger = get_logger("settings")
+logger = logging.getLogger("settings")
 
 
 AZURE_CLIENT_ID: str = os.getenv("AZURE_CLIENT_ID", "")

@@ -10,10 +10,22 @@ import "reactflow/dist/style.css";
 // Simple placeholder that gets replaced at container startup, with fallback for local dev
 const backendPlaceholder = '__BACKEND_URL__';
 const API_BASE_URL = backendPlaceholder.startsWith('__') 
-  ? import.meta.env.VITE_BACKEND_BASE_URL || 'http://localhost:8000'
+  ? import.meta.env.VITE_BACKEND_BASE_URL || 'http://localhost:8010'
   : backendPlaceholder;
 
-const WS_URL = API_BASE_URL.replace(/^https?/, "wss");
+// Build the correct WS scheme: ws:// for http, wss:// for https
+const WS_URL = API_BASE_URL.startsWith('https://')
+  ? API_BASE_URL.replace(/^https:\/\//, 'wss://')
+  : API_BASE_URL.replace(/^http:\/\//, 'ws://');
+
+console.log('🔧 DEBUG URLs:');
+console.log('  API_BASE_URL ->', API_BASE_URL);
+console.log('  WS_URL ->', WS_URL);
+console.log('  env VITE_BACKEND_BASE_URL ->', import.meta.env.VITE_BACKEND_BASE_URL);
+
+// Guard against trailing slash on base URL to avoid double slashes
+const withSession = (baseWsUrl, path, sessionId) =>
+  `${baseWsUrl.replace(/\/$/, '')}${path}?session_id=${encodeURIComponent(sessionId)}`;
 
 /* ------------------------------------------------------------------ *
  *  STYLES
@@ -1717,9 +1729,14 @@ function RealTimeVoiceApp() {
   const messageContainerRef = useRef(null);
   const socketRef    = useRef(null);
   // const recognizerRef= useRef(null);
+  const relayRef     = useRef(null);            //  track relay socket
+  const sessionIdRef = useRef(crypto.randomUUID()); //  stable per-tab session id
+  const isStoppingRef= useRef(false);           // prevent double-stop races
 
   // Fix: missing refs for audio and processor
   const audioContextRef = useRef(null);
+  const playbackAudioCtxRef = useRef(null); // single playback context (output)
+  const playbackTimeRef = useRef(0);        // schedule cursor for streamed TTS
   const processorRef = useRef(null);
   const analyserRef = useRef(null);
   const micStreamRef = useRef(null);
@@ -1753,11 +1770,26 @@ function RealTimeVoiceApp() {
   /* ---------- teardown on unmount ---------- */
   useEffect(() => {
     return () => {
+      isStoppingRef.current = true;
       if (processorRef.current) {
         try { 
           processorRef.current.disconnect(); 
         } catch (e) {
           console.warn("Cleanup error:", e);
+        }
+      }
+      if (relayRef.current) {
+        try {
+          relayRef.current.close();
+        } catch (e) {
+          console.warn("Cleanup relay error:", e);
+        }
+      }
+      if (micStreamRef.current) {
+        try {
+          micStreamRef.current.getTracks().forEach(t => t.stop());
+        } catch (e) {
+         console.warn("Cleanup mic tracks error:", e);
         }
       }
       if (audioContextRef.current) {
@@ -1786,12 +1818,26 @@ function RealTimeVoiceApp() {
    *  START RECOGNITION + WS
    * ------------------------------------------------------------------ */
   const startRecognition = async () => {
+    try {
+      // mind-map reset not needed
+      if (socketRef.current && (socketRef.current.readyState === WebSocket.OPEN || socketRef.current.readyState === WebSocket.CONNECTING)) {
+        appendLog("🟢 WS already open (startRecognition ignored)");
+        return; // idempotent
+      }
+      if (isStoppingRef.current) {
+        appendLog("⏳ Stop in progress; startRecognition deferred");
+        return;
+      }
       // mind-map reset not needed
       setMessages([]);
-      appendLog("🎤 PCM streaming started");
+      appendLog("🎤 Starting voice conversation...");
 
       // 1) open WS
-      const socket = new WebSocket(`${WS_URL}/api/v1/realtime/conversation`);
+      const wsUrl = withSession(WS_URL, `/api/v1/realtime/conversation`, sessionIdRef.current);
+      console.log("🔌 Connecting to WebSocket:", wsUrl);
+      appendLog("🔌 Connecting to: " + wsUrl);
+      
+      const socket = new WebSocket(wsUrl);
       socket.binaryType = "arraybuffer";
 
       socket.onopen = () => {
@@ -1800,20 +1846,24 @@ function RealTimeVoiceApp() {
       };
       socket.onclose = () => {
         console.log("WebSocket connection CLOSED.");
+        appendLog("❌ WebSocket closed");
       };
       socket.onerror = (err) => {
         console.error("WebSocket error:", err);
+        appendLog("❌ WebSocket error: " + err.message);
       };
       socket.onmessage = handleSocketMessage;
       socketRef.current = socket;
 
       // 2) setup Web Audio for raw PCM @16 kHz
+      appendLog("🎤 Requesting microphone access...");
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      appendLog("✅ Microphone access granted");
+      
       micStreamRef.current = stream;
-      const audioCtx = new (window.AudioContext || window.webkitAudioContext)({
-        sampleRate: 16000
-      });
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
       audioContextRef.current = audioCtx;
+      const bufferSize = 512; 
 
       const source = audioCtx.createMediaStreamSource(stream);
 
@@ -1827,7 +1877,6 @@ function RealTimeVoiceApp() {
       source.connect(analyser);
 
       // 3) ScriptProcessor with small buffer for low latency (256 or 512 samples)
-      const bufferSize = 512; 
       const processor  = audioCtx.createScriptProcessor(bufferSize, 1, 1);
       processorRef.current = processor;
 
@@ -1848,21 +1897,13 @@ function RealTimeVoiceApp() {
         audioLevelRef.current = level;
         setAudioLevel(level);
 
-        // Debug: Log a sample of mic data
-        console.log("Mic data sample:", float32.slice(0, 10)); // Should show non-zero values if your mic is hot
-
         const int16 = new Int16Array(float32.length);
         for (let i = 0; i < float32.length; i++) {
           int16[i] = Math.max(-1, Math.min(1, float32[i])) * 0x7fff;
         }
 
-        // Debug: Show size before send
-        console.log("Sending int16 PCM buffer, length:", int16.length);
-
         if (socket.readyState === WebSocket.OPEN) {
           socket.send(int16.buffer);
-          // Debug: Confirm data sent
-          console.log("PCM audio chunk sent to backend!");
         } else {
           console.log("WebSocket not open, did not send audio.");
         }
@@ -1871,9 +1912,39 @@ function RealTimeVoiceApp() {
       source.connect(processor);
       processor.connect(audioCtx.destination);
       setRecording(true);
-    };
+      appendLog("✅ Voice conversation started!");
+      
+    } catch (error) {
+      console.error("Failed to start recognition:", error);
+      appendLog("❌ Failed to start voice conversation: " + error.message);
+      
+      // Specific error messages for common issues
+      if (error.name === 'NotAllowedError') {
+        appendLog("🔒 Microphone access denied. Please allow microphone permission and try again.");
+      } else if (error.name === 'NotFoundError') {
+        appendLog("🎤 No microphone found. Please check your audio device.");
+      } else if (error.name === 'NotSupportedError') {
+        appendLog("❌ Microphone not supported in this browser.");
+      } else {
+        appendLog("❌ Error: " + error.message);
+      }
+      
+      // Clean up on error
+      setRecording(false);
+      if (socketRef.current) {
+        try {
+          socketRef.current.close();
+        } catch (e) {
+          console.warn("Error closing socket after error:", e);
+        }
+        socketRef.current = null;
+      }
+    }
+  };
 
     const stopRecognition = () => {
+      if (isStoppingRef.current) return;
+      isStoppingRef.current = true;
       if (processorRef.current) {
         try { 
           processorRef.current.disconnect(); 
@@ -1890,6 +1961,14 @@ function RealTimeVoiceApp() {
         }
         audioContextRef.current = null;
       }
+      if (micStreamRef.current) {
+        try {
+          micStreamRef.current.getTracks().forEach(t => t.stop());
+        } catch (e) {
+          console.warn("Error stopping mic tracks:", e);
+        }
+        micStreamRef.current = null;
+      }
       if (socketRef.current) {
         try { 
           socketRef.current.close(); 
@@ -1898,7 +1977,14 @@ function RealTimeVoiceApp() {
         }
         socketRef.current = null;
       }
-      
+      if (relayRef.current) {
+        try {
+          relayRef.current.close();
+        } catch (e) {
+          console.warn("Error closing relay socket:", e);
+        }
+        relayRef.current = null;
+      }
       // Add session stopped message instead of clearing everything
       setMessages(m => [...m, { 
         speaker: "System", 
@@ -1907,6 +1993,7 @@ function RealTimeVoiceApp() {
       setActiveSpeaker("System");
       setRecording(false);
       appendLog("🛑 PCM streaming stopped");
+      isStoppingRef.current = false;
       
       // Don't clear all state - preserve chat history and UI
       // Just stop the recording session
@@ -1920,25 +2007,82 @@ function RealTimeVoiceApp() {
       if (last.speaker === msg.speaker && last.text === msg.text) return arr;
       return [...arr, msg];
     };
-
     const handleSocketMessage = async (event) => {
-      if (typeof event.data !== "string") {
-        const ctx = new AudioContext();
-        const buf = await event.data.arrayBuffer();
-        const audioBuf = await ctx.decodeAudioData(buf);
-        const src = ctx.createBufferSource();
-        src.buffer = audioBuf;
-        src.connect(ctx.destination);
-        src.start();
-        appendLog("🔊 Audio played");
-        return;
+      // --- helper: base64 PCM16LE -> Float32Array ---
+      const pcm16Base64ToFloat32 = (b64) => {
+        const bin = atob(b64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const view = new DataView(bytes.buffer);
+      const sampleCount = bytes.byteLength / 2;
+      const out = new Float32Array(sampleCount);
+      let o = 0;
+      for (let i = 0; i < bytes.byteLength; i += 2) {
+        const s = view.getInt16(i, true); // little-endian
+        out[o++] = s / 0x8000;
       }
+      return out;
+    };
+
+    // --- helper: schedule frame on a single AudioContext without gaps ---
+    const playPcmBase64Frame = async (b64, sampleRate = 16000) => {
+      let ctx = playbackAudioCtxRef.current;
+      if (!ctx || ctx.state === "closed") {
+        ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate });
+        playbackAudioCtxRef.current = ctx;
+        playbackTimeRef.current = 0;
+      }
+      if (ctx.state === "suspended") {
+        try { await ctx.resume(); } catch {}
+      }
+
+      const samples = pcm16Base64ToFloat32(b64);
+      const buffer = ctx.createBuffer(1, samples.length, sampleRate);
+      buffer.getChannelData(0).set(samples);
+
+      const src = ctx.createBufferSource();
+      src.buffer = buffer;
+      src.connect(ctx.destination);
+
+      const now = ctx.currentTime;
+      // small safety lead to avoid “in the past” scheduling
+      const lead = 0.02;
+      const startAt = Math.max(playbackTimeRef.current || now + lead, now + lead);
+      src.start(startAt);
+
+      const duration = samples.length / sampleRate;
+      playbackTimeRef.current = startAt + duration;
+
+      src.onended = () => { try { src.disconnect(); } catch {} };
+    };
+       if (typeof event.data !== "string") {
+        // Reuse a single playback context for all outbound audio
+        let ctx = playbackAudioCtxRef.current;
+        if (!ctx || ctx.state === "closed") {
+          ctx = new (window.AudioContext || window.webkitAudioContext)();
+          playbackAudioCtxRef.current = ctx;
+        }
+        const buf = await event.data.arrayBuffer();
+        const audioBuf = await ctx.decodeAudioData(buf.slice(0));
+        const src = ctx.createBufferSource();
+         src.buffer = audioBuf;
+         src.connect(ctx.destination);
+         src.onended = () => { try { src.disconnect(); } catch {} };
+         src.start();
+         appendLog("🔊 Audio played");
+         return;
+       }
     
       let payload;
       try {
         payload = JSON.parse(event.data);
       } catch {
         appendLog("Ignored non‑JSON frame");
+        return;
+      }
+      // 🔒 Inbound filtering by session_id
+      if (payload?.session_id && payload.session_id !== sessionIdRef.current) {
+        appendLog(`🚫 Dropped frame for foreign session: ${payload.session_id}`);
         return;
       }
       // --- Handle relay/broadcast messages with {sender, message} ---
@@ -1948,6 +2092,36 @@ function RealTimeVoiceApp() {
         payload.content = payload.message;
         // fall through to unified logic below
       }
+      if (payload.type === "audio_data" && payload.data) {
+        setActiveSpeaker("Assistant");
+        try {
+          await playPcmBase64Frame(
+            payload.data,
+            payload.sample_rate || 16000
+          );
+          if (typeof payload.frame_index === "number" && typeof payload.total_frames === "number") {
+            appendLog(`🔊 TTS frame ${payload.frame_index + 1}/${payload.total_frames}`);
+          } else {
+            appendLog("🔊 TTS frame played");
+          }
+        } catch (e) {
+          appendLog(`⚠️ TTS frame error: ${e.message || e}`);
+        }
+        return;
+      }
+
+      // --- NEW: ACS 'AudioData' envelope (phone-call TTS) ---
+      if (payload.kind === "AudioData" && payload.AudioData?.data) {
+        setActiveSpeaker("Assistant");
+        try {
+          await playPcmBase64Frame(payload.AudioData.data, 16000);
+          appendLog("🔊 ACS audio frame played");
+        } catch (e) {
+          appendLog(`⚠️ ACS frame error: ${e.message || e}`);
+        }
+        return;
+      }
+
       const { type, content = "", message = "", speaker } = payload;
       const txt = content || message;
       const msgType = (type || "").toLowerCase();
@@ -2054,7 +2228,7 @@ function RealTimeVoiceApp() {
       const res = await fetch(`${API_BASE_URL}/api/v1/calls/initiate`, {
         method:"POST",
         headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ target_number: targetPhoneNumber }),
+        body: JSON.stringify({ target_number: targetPhoneNumber, session_id: sessionIdRef.current }),
       });
       const json = await res.json();
       if (!res.ok) {
@@ -2066,38 +2240,43 @@ function RealTimeVoiceApp() {
         ...m,
         { speaker:"Assistant", text:`📞 Call started → ${targetPhoneNumber}` }
       ]);
-      appendLog("📞 Call initiated");
+  appendLog("📞 Call initiated");
 
-      // relay WS
-      const relay = new WebSocket(`${WS_URL}/api/v1/realtime/dashboard/relay`);
-      relay.onopen = () => appendLog("Relay WS connected");
-      relay.onmessage = ({data}) => {
-        try {
-          const obj = JSON.parse(data);
-          if (obj.type?.startsWith("tool_")) {
-            handleSocketMessage({ data: JSON.stringify(obj) });
-            return;
-          }
-          const { sender, message } = obj;
-          setMessages(m => [...m, { speaker: sender, text: message }]);
-          setActiveSpeaker(sender);
-          appendLog(`[Relay] ${sender}: ${message}`);
-        } catch {
-          appendLog("Relay parse error");
-        }
-      };
-      relay.onclose = () => {
-        appendLog("Relay WS disconnected");
-        setCallActive(false);
-        setActiveSpeaker(null);
-        // setFunctionCalls([]);
-        // setCallResetKey(k=>k+1);
-      };
-    } catch(e) {
-      appendLog(`Network error starting call: ${e.message}`);
+  // relay WS (idempotent; one per session)
+  if (relayRef.current && (relayRef.current.readyState === WebSocket.OPEN || relayRef.current.readyState === WebSocket.CONNECTING)) {
+    try { relayRef.current.close(); } catch {}
+  }
+  const relay = new WebSocket(withSession(WS_URL, `/api/v1/realtime/dashboard/relay`, sessionIdRef.current));
+  relayRef.current = relay;
+  relay.onopen = () => appendLog("Relay WS connected");
+  relay.onmessage = ({ data }) => {
+    try {
+      const obj = JSON.parse(data);
+      if (obj?.session_id && obj.session_id !== sessionIdRef.current) {
+        appendLog(`🚫 Dropped relay frame for foreign session: ${obj.session_id}`);
+        return;
+      }
+      if (obj.type?.startsWith("tool_")) {
+        handleSocketMessage({ data: JSON.stringify(obj) });
+        return;
+      }
+      const { sender, message } = obj;
+      setMessages(m => [...m, { speaker: sender, text: message }]);
+      setActiveSpeaker(sender);
+      appendLog(`[Relay] ${sender}: ${message}`);
+    } catch {
+      appendLog("Relay parse error");
     }
   };
-
+  relay.onclose = () => {
+    appendLog("Relay WS disconnected");
+    setCallActive(false);
+    setActiveSpeaker(null);
+  };
+} catch (e) {
+      appendLog(`Call error: ${e.message}`);
+    }
+  };
   /* ------------------------------------------------------------------ *
    *  RENDER
    * ------------------------------------------------------------------ */
@@ -2202,7 +2381,17 @@ function RealTimeVoiceApp() {
                   setShowMicTooltip(false);
                   setMicHovered(false);
                 }}
-                onClick={recording ? stopRecognition : startRecognition}
+                onClick={() => {
+                  console.log("🎤 Microphone button clicked, recording state:", recording);
+                  appendLog("🎤 Microphone button clicked");
+                  if (recording) {
+                    console.log("🛑 Stopping recognition");
+                    stopRecognition();
+                  } else {
+                    console.log("🎤 Starting recognition");
+                    startRecognition();
+                  }
+                }}
               >
                 {recording ? "🛑" : "🎤"}
               </button>

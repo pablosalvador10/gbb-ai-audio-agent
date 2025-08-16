@@ -4,7 +4,7 @@ voice_agent.main
 Entrypoint that stitches everything together:
 
 • config / CORS
-• shared objects on `app.state`  (Speech, Redis, ACS, TTS, dashboard-clients)
+• shared objects on `app.state`  (Speech, Redis, ACS, TTS, dashboard-clients, session registries)
 • route registration (routers package)
 """
 
@@ -17,23 +17,20 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 sys.path.insert(0, os.path.dirname(__file__))
 
-from utils.telemetry_config import setup_azure_monitor
+# from utils.telemetry_config import setup_azure_monitor
 
 # ---------------- Monitoring ------------------------------------------------
-setup_azure_monitor(logger_name="rtagent")
-
+# setup_azure_monitor(logger_name="rtagent")  # Temporarily disabled for debugging
 
 from utils.ml_logging import get_logger
 
 logger = get_logger("main")
 
-import os
 import time
 import asyncio
 from datetime import datetime
-from contextlib import asynccontextmanager
+from collections import defaultdict
 
-import uvicorn
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -59,7 +56,6 @@ from apps.rtagent.backend.src.agents.base import RTAgent
 from apps.rtagent.backend.src.utils.auth import validate_entraid_token
 from apps.rtagent.backend.src.agents.prompt_store.prompt_manager import PromptManager
 
-# from apps.rtagent.backend.src.routers import router as api_router
 from apps.rtagent.backend.api.v1.router import v1_router
 from apps.rtagent.backend.src.services import (
     AzureRedisManager,
@@ -76,6 +72,72 @@ from apps.rtagent.backend.src.services.openai_services import (
 from apps.rtagent.backend.api.v1.events.registration import register_default_handlers
 
 
+# ------------------------------------------------------------------------------
+# Helper utilities (safe warmups / shutdown)
+# ------------------------------------------------------------------------------
+
+async def _maybe_call(obj, *method_names, timeout: float = 3.0):
+    """Best-effort call to a method on obj (supports async or sync)."""
+    for name in method_names:
+        fn = getattr(obj, name, None)
+        if not fn:
+            continue
+        try:
+            if asyncio.iscoroutinefunction(fn):
+                return await asyncio.wait_for(fn(), timeout=timeout)
+            # If it returns awaitable anyway
+            res = fn()
+            if asyncio.iscoroutine(res):
+                return await asyncio.wait_for(res, timeout=timeout)
+            return res
+        except Exception as e:
+            logger.warning(f"Warmup/shutdown method '{name}' failed on {type(obj).__name__}: {e}")
+    return None
+
+
+async def _warmup_dependencies(app: FastAPI):
+    """Best-effort warmup (don’t fail startup if something is slow)."""
+    logger.info("🔥 warmup start")
+
+    tasks = []
+
+    # Redis ping
+    if hasattr(app.state, "redis"):
+        tasks.append(_maybe_call(app.state.redis, "warmup", "ping"))
+
+    # Cosmos health_check or ping
+    if hasattr(app.state, "cosmos"):
+        tasks.append(_maybe_call(app.state.cosmos, "warmup", "health_check", "ping"))
+
+    # Azure OpenAI: some SDKs provide a warmup; otherwise no-op
+    if hasattr(app.state, "azureopenai_client"):
+        tasks.append(_maybe_call(app.state.azureopenai_client, "warmup"))
+
+    # TTS/STT: many SDKs don’t like being called at startup; only call if explicit warmup exists
+    if hasattr(app.state, "tts_client"):
+        tasks.append(_maybe_call(app.state.tts_client, "warmup", "prewarm"))
+    if hasattr(app.state, "stt_client"):
+        tasks.append(_maybe_call(app.state.stt_client, "warmup", "prewarm"))
+
+    # Agents can expose warmups too
+    for agent_name in ("auth_agent", "claim_intake_agent", "general_info_agent"):
+        if hasattr(app.state, agent_name):
+            tasks.append(_maybe_call(getattr(app.state, agent_name), "warmup"))
+
+    # Run with global timeout; swallow errors
+    try:
+        await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=5.0)
+    except asyncio.TimeoutError:
+        logger.warning("Warmup timed out (continuing startup)")
+
+    logger.info("🔥 warmup end")
+
+
+async def _graceful_close(obj):
+    """Try to close/dispose/aclose an object without raising."""
+    await _maybe_call(obj, "aclose", "close", "dispose", timeout=2.0)
+
+
 # --------------------------------------------------------------------------- #
 #  Lifecycle Management
 # --------------------------------------------------------------------------- #
@@ -89,22 +151,41 @@ async def lifespan(app: FastAPI):
         logger.info("🚀 startup…")
         start_time = time.perf_counter()
 
-        # Set span attributes for better correlation
         span.set_attributes(
             {
                 "service.name": "rtagent-api",
                 "service.version": "1.0.0",
                 "startup.stage": "initialization",
+                "worker.pid": os.getpid(),
             }
         )
 
-        # Initialize app state
-        app.state.clients = set()  # /relay dashboard sockets
-        app.state.greeted_call_ids = set()  # to avoid double greetings
+        # ------------------------ Process-wide shared state -------------------
+        app.state.started_at = datetime.utcnow().isoformat()
+        app.state.worker_pid = os.getpid()
 
-        # Speech SDK
+        # 🧭 Dashboard clients (process-wide)
+        app.state.clients = set()              # /relay dashboard sockets
+        app.state.greeted_call_ids = set()     # avoid double greetings
+
+        # 🔐 Session routing registries (process-wide, concurrency-safe)
+        # - session_sockets: session_id -> set[WebSocket]
+        # - call_session:    call_id    -> session_id  (ACS mapping)
+        # - session_lock:    protects both structures
+        app.state.session_lock = asyncio.Lock()
+        app.state.session_sockets = defaultdict(set)
+        app.state.call_session = {}
+
+        # lightweight counters (optional)
+        app.state.session_metrics = {
+            "ws_connected": 0,
+            "ws_disconnected": 0,
+            "last_updated": datetime.utcnow().isoformat(),
+        }
+        # ---------------------------------------------------------------------
+
+        # Speech SDK factories/config (shared)
         span.set_attribute("startup.stage", "speech_sdk")
-        # Speech SDK
         app.state.tts_client = SpeechSynthesizer(
             voice=GREETING_VOICE_TTS, playback="always"
         )
@@ -114,8 +195,9 @@ async def lifespan(app: FastAPI):
             candidate_languages=RECOGNIZED_LANGUAGE,
             audio_format=AUDIO_FORMAT,
         )
+        # NOTE: per-WS streams are created inside WS handlers using these factories.
 
-        # Redis connection
+        # Redis connection (single client with internal pool)
         span.set_attribute("startup.stage", "redis")
         app.state.redis = AzureRedisManager()
 
@@ -127,6 +209,7 @@ async def lifespan(app: FastAPI):
             collection_name=AZURE_COSMOS_COLLECTION_NAME,
         )
 
+        # OpenAI / prompts
         span.set_attribute("startup.stage", "openai_clients")
         app.state.azureopenai_client = azure_openai_client
         app.state.promptsclient = PromptManager()
@@ -134,30 +217,31 @@ async def lifespan(app: FastAPI):
         # Outbound ACS caller (may be None if env vars missing)
         span.set_attribute("startup.stage", "acs_agents")
         app.state.acs_caller = initialize_acs_caller_instance()
+
+        # Agents (stateless or read shared state)
         app.state.auth_agent = RTAgent(config_path=AGENT_AUTH_CONFIG)
         app.state.claim_intake_agent = RTAgent(config_path=AGENT_CLAIM_INTAKE_CONFIG)
         app.state.general_info_agent = RTAgent(config_path=AGENT_GENERAL_INFO_CONFIG)
 
-        # Legacy event registry
-        # span.set_attribute("startup.stage", "event_system")
-        # initialize_call_event_registry()
-        # initialize_media_event_registry()
-
-        # Initialize V1 event handlers during startup
+        # Register v1 event handlers at startup (idempotent)
         span.set_attribute("startup.stage", "v1_event_handlers")
         register_default_handlers()
         logger.info("✅ V1 event handlers registered at startup")
 
-        # Initialize enterprise orchestrator
+        # Orchestrator preset (informational)
         span.set_attribute("startup.stage", "orchestrator")
-        # Use environment variable to determine orchestrator preset, default to production
         orchestrator_preset = os.getenv("ORCHESTRATOR_PRESET", "production")
         logger.info(f"Initializing orchestrator with preset: {orchestrator_preset}")
+
+        # Best-effort warmups with small timeouts (don’t block startup)
+        try:
+            await _warmup_dependencies(app)
+        except Exception as e:
+            logger.warning(f"Warmup encountered issues (continuing): {e}")
 
         elapsed = time.perf_counter() - start_time
         logger.info(f"startup complete in {elapsed:.2f}s")
 
-        # Set final span attributes
         span.set_attributes(
             {
                 "startup.duration_sec": elapsed,
@@ -176,14 +260,29 @@ async def lifespan(app: FastAPI):
             {"service.name": "rtagent-api", "shutdown.stage": "cleanup"}
         )
 
+        # Graceful close of known resources (best-effort)
+        for attr in (
+            "redis",
+            "cosmos",
+            "tts_client",
+            "stt_client",
+            "acs_caller",
+            "promptsclient",
+            "azureopenai_client",
+        ):
+            obj = getattr(app.state, attr, None)
+            if obj:
+                try:
+                    await _graceful_close(obj)
+                except Exception as e:
+                    logger.warning(f"Error during shutdown of {attr}: {e}")
+
         span.set_attribute("shutdown.success", True)
 
 
 # --------------------------------------------------------------------------- #
 #  App factory with Dynamic Documentation
 # --------------------------------------------------------------------------- #
-
-
 def create_app() -> FastAPI:
     """Create FastAPI app with static documentation."""
 
@@ -218,11 +317,9 @@ def create_app() -> FastAPI:
 # --------------------------------------------------------------------------- #
 #  App Initialization with Dynamic Documentation
 # --------------------------------------------------------------------------- #
-
-
 def setup_app_middleware_and_routes(app: FastAPI):
     """Set up middleware and routes for the app."""
-    # Add middleware
+    # CORS
     app.add_middleware(
         CORSMiddleware,
         allow_origins=ALLOWED_ORIGINS,
@@ -232,8 +329,7 @@ def setup_app_middleware_and_routes(app: FastAPI):
         max_age=86400,
     )
 
-    # If auth validation is enabled, add auth middleware with
-    # excluded paths for ACS-specific connections and health check
+    # Optional Entra ID validation for non-exempt paths
     if ENABLE_AUTH_VALIDATION:
 
         @app.middleware("http")
@@ -251,13 +347,10 @@ def setup_app_middleware_and_routes(app: FastAPI):
 
             return await call_next(request)
 
-    # Include legacy routers for compatibility (maintain existing paths for backward compatibility)
-    # app.include_router(api_router)
-
-    # Include new V1 API
+    # Include v1 API
     app.include_router(v1_router)
 
-    # Include health endpoints at root level for frontend compatibility
+    # Health endpoints at root level
     from apps.rtagent.backend.api.v1.endpoints import health
 
     app.include_router(health.router, tags=["Health"])
@@ -275,8 +368,7 @@ def initialize_app():
     return app
 
 
-# Initialize the app
-# Initialize the app
+# Initialize the app at import time (for ASGI servers)
 app = initialize_app()
 
 # --------------------------------------------------------------------------- #
