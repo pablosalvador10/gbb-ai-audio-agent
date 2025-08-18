@@ -1,5 +1,6 @@
 """
-This module powers real‑time voice‑agent sessions. It extends the original
+This mofrom src.agenticmemory.playback_queue import MessageQueue
+from src.agenticmemory.types import ChatHistory, CoreMemorye powers real‑time voice‑agent sessions. It extends the original
 `MemoManager` with **live‑refresh** helpers that keep local state in sync with a
 shared Redis cache and expose fine‑grained utilities for selective updates.
 """
@@ -8,7 +9,7 @@ import asyncio
 import json
 import uuid
 from collections import deque
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from src.agenticmemory.playback_queue import MessageQueue
 from src.agenticmemory.types import ChatHistory, CoreMemory
@@ -18,6 +19,12 @@ from src.agenticmemory.utils import LatencyTracker
 from src.prompts.prompt_manager import PromptManager
 from src.redis.manager import AzureRedisManager
 from utils.ml_logging import get_logger
+
+# Import minimal latency tracker
+try:
+    from src.latency.minimal_suite import MinimalLatencyTracker
+except ImportError:
+    MinimalLatencyTracker = None
 
 logger = get_logger("src.stateful.state_managment")
 
@@ -29,12 +36,14 @@ class MemoManager:
 
     _CORE_KEY = "corememory"
     _HISTORY_KEY = "chat_history"
+    _LATENCY_KEY = "latency_data"
 
     def __init__(
         self,
         session_id: Optional[str] = None,
         auto_refresh_interval: Optional[float] = None,
         redis_mgr: Optional[AzureRedisManager] = None,
+        enable_minimal_tracking: bool = True,
     ) -> None:
         """
         Constructor for MemoManager.
@@ -43,17 +52,191 @@ class MemoManager:
         session_id (str): the session ID (default: a new UUID4)
         auto_refresh_interval (float): optional interval in seconds for auto-refresh (default: None)
         redis_mgr (AzureRedisManager): optional Redis manager (default: None)
+        enable_minimal_tracking (bool): whether to enable minimal latency tracking (default: True)
         """
         self.session_id: str = session_id or str(uuid.uuid4())[:8]
         self.chatHistory: ChatHistory = ChatHistory()
         self.corememory: CoreMemory = CoreMemory()
         self.message_queue = MessageQueue()
         self._is_tts_interrupted: bool = False
-        self.latency = LatencyTracker()
         self.auto_refresh_interval = auto_refresh_interval
         self.last_refresh_time = 0
         self._refresh_task: Optional[asyncio.Task] = None
         self._redis_manager: Optional[AzureRedisManager] = redis_mgr
+        
+        # Minimal Latency Suite V2 (replacing enhanced tracker)
+        self._latency_tracker = None
+        if enable_minimal_tracking:
+            self._init_minimal_latency_tracker()
+
+    def _init_minimal_latency_tracker(self):
+        """Initialize minimal latency tracker."""
+        try:
+            from src.latency.minimal_suite import MinimalLatencyTracker
+            self._latency_tracker = MinimalLatencyTracker(self.session_id)
+            logger.info(f"Minimal latency tracking initialized for session {self.session_id}")
+        except ImportError:
+            logger.debug("Minimal latency tracker not available")
+            self._latency_tracker = None
+        except Exception as e:
+            logger.warning(f"Failed to initialize minimal latency tracker: {e}")
+            self._latency_tracker = None
+
+    def _restore_latency_data(self, latency_data: Dict[str, Any]):
+        """Restore latency measurements from Redis data."""
+        if not self._latency_tracker or not latency_data:
+            return
+        
+        try:
+            # Restore measurements if they exist
+            measurements = latency_data.get("measurements", [])
+            if measurements and hasattr(self._latency_tracker, 'measurements'):
+                # Convert dict measurements back to LatencyMeasurement objects
+                from src.latency.minimal_suite import LatencyMeasurement
+                
+                restored_measurements = []
+                for m in measurements:
+                    if isinstance(m, dict):
+                        measurement = LatencyMeasurement.from_dict(m)
+                        restored_measurements.append(measurement)
+                
+                self._latency_tracker.measurements = restored_measurements
+                logger.info(f"Restored {len(restored_measurements)} latency measurements")
+            
+            # Restore current turn state
+            if "current_turn_id" in latency_data:
+                self._latency_tracker.current_turn_id = latency_data["current_turn_id"]
+            if "current_agent" in latency_data:
+                self._latency_tracker.current_agent = latency_data["current_agent"]
+                
+        except Exception as e:
+            logger.error(f"Failed to restore latency measurements: {e}")
+
+    def start_turn(self, turn_id: str = "", agent: str = "") -> str:
+        """Start a new conversation turn."""
+        if self._latency_tracker:
+            return self._latency_tracker.start_turn(turn_id, agent)
+        return ""
+
+    def track_stage(self, component: str):
+        """
+        Track a pipeline component (async context manager) - alias for track().
+        
+        Usage:
+            async with memo_manager.track_stage("stt_pipeline"):
+                # Async pipeline code
+                pass
+        
+        Note: This is the same as track() and returns an async context manager
+        """
+        return self.track(component)
+
+    def track_tool(self, tool_name: str, duration_ms: float):
+        """Track tool execution time."""
+        if self._latency_tracker:
+            self._latency_tracker.track_tool(tool_name, duration_ms)
+
+    @property
+    def latencies(self) -> Dict[str, Any]:
+        """Get all latency information from Minimal Latency Suite V2."""
+        result = {
+            "session_id": self.session_id,
+            "minimal_v2": None,
+            "available": self._latency_tracker is not None
+        }
+        
+        if self._latency_tracker:
+            try:
+                summary = self._latency_tracker.get_summary()
+                result["minimal_v2"] = {
+                    "session_id": summary["session_id"],
+                    "total_measurements": summary["total_measurements"],
+                    "total_turns": summary.get("total_turns", 0),
+                    "components": summary.get("components", {}),
+                    "agents": summary.get("agents", {}),
+                    "performance": {
+                        "overhead_ns": summary.get("overhead_ns", 0),
+                        "avg_overhead_ms": summary.get("overhead_ns", 0) / 1_000_000,
+                    }
+                }
+            except Exception as e:
+                logger.error(f"Failed to get minimal latency data: {e}")
+                result["minimal_v2"] = {"error": str(e)}
+        
+        return result
+
+    def end_turn(self, turn_id: Optional[str] = None):
+        """End the current conversation turn."""
+        # This method exists for compatibility but minimal tracker doesn't need explicit end_turn
+
+    # === Minimal Latency Tracker Methods ===
+    
+    @property
+    def latency_tracker(self) -> Optional[Any]:
+        """Get minimal latency tracker if available."""
+        return self._latency_tracker
+
+    def track(self, component: str):
+        """
+        Async context manager for tracking component latency with Minimal Latency Suite V2.
+        
+        Usage:
+            async with memo_manager.track("stt_capture"):
+                # Async speech recognition code
+                result = await speech_service.recognize()
+        
+        Note: This returns an async context manager that must be used with 'async with'
+        """
+        if self._latency_tracker:
+            return self._latency_tracker.track(component)
+        else:
+            # No-op async context manager when tracker not available
+            from contextlib import asynccontextmanager
+            
+            @asynccontextmanager
+            async def null_tracker():
+                yield
+            
+            return null_tracker()
+
+
+
+    async def get_latency_summary(self) -> Dict[str, Any]:
+        """
+        Get comprehensive latency summary from Minimal Latency Suite V2.
+        
+        Returns:
+            Dict containing minimal tracker metrics only
+        """
+        if not self._latency_tracker:
+            return {
+                "session_id": self.session_id,
+                "minimal_v2_enabled": False,
+                "message": "Minimal Latency Suite V2 not initialized"
+            }
+        
+        try:
+            tracker_summary = self._latency_tracker.get_summary()
+            return {
+                "session_id": tracker_summary["session_id"],
+                "minimal_v2_enabled": True,
+                "total_measurements": tracker_summary["total_measurements"],
+                "total_turns": tracker_summary.get("total_turns", 0),
+                "component_breakdown": tracker_summary.get("components", {}),
+                "agent_breakdown": tracker_summary.get("agents", {}),
+                "performance": {
+                    "overhead_ns": tracker_summary.get("overhead_ns", 0),
+                    "avg_overhead_ms": tracker_summary.get("overhead_ns", 0) / 1_000_000,
+                    "percentiles_available": True
+                }
+            }
+        except Exception as e:
+            logger.error(f"Failed to get minimal latency summary: {e}")
+            return {
+                "session_id": self.session_id,
+                "minimal_v2_enabled": False,
+                "error": str(e)
+            }
 
     # ------------------------------------------------------------------
     # Compatibility aliases
@@ -86,20 +269,49 @@ class MemoManager:
         return f"session:{session_id}"
 
     def to_redis_dict(self) -> Dict[str, str]:
-        return {
+        """Serialize session data for Redis storage including latency data."""
+        redis_dict = {
             self._CORE_KEY: self.corememory.to_json(),
             self._HISTORY_KEY: self.chatHistory.to_json(),
         }
+        
+        # Include latency data if minimal tracker is available
+        if self._latency_tracker:
+            try:
+                latency_summary = self._latency_tracker.get_summary()
+                redis_dict[self._LATENCY_KEY] = json.dumps(latency_summary)
+            except Exception as e:
+                logger.warning(f"Failed to serialize latency data: {e}")
+        
+        return redis_dict
 
     @classmethod
     def from_redis(cls, session_id: str, redis_mgr: AzureRedisManager) -> "MemoManager":
+        """Load MemoManager from Redis with minimal tracking enabled."""
         key = cls.build_redis_key(session_id)
         data = redis_mgr.get_session_data(key)
-        mm = cls(session_id=session_id)
+        
+        # Create with minimal tracking enabled and Redis manager
+        mm = cls(
+            session_id=session_id, 
+            redis_mgr=redis_mgr,
+            enable_minimal_tracking=True
+        )
+        
         if mm._CORE_KEY in data:
             mm.corememory.from_json(data[mm._CORE_KEY])
         if mm._HISTORY_KEY in data:
             mm.chatHistory.from_json(data[mm._HISTORY_KEY])
+        
+        # Restore latency data if available
+        if mm._LATENCY_KEY in data and mm._latency_tracker:
+            try:
+                latency_data = json.loads(data[mm._LATENCY_KEY])
+                mm._restore_latency_data(latency_data)
+                logger.info(f"Restored latency data for session {session_id}")
+            except Exception as e:
+                logger.warning(f"Failed to restore latency data: {e}")
+        
         return mm
 
     @classmethod
@@ -126,9 +338,21 @@ class MemoManager:
         redis_mgr.store_session_data(key, self.to_redis_dict())
         if ttl_seconds:
             redis_mgr.redis_client.expire(key, ttl_seconds)
+        
+        # Enhanced logging with latency information
+        latency_info = ""
+        if self._latency_tracker:
+            try:
+                summary = self._latency_tracker.get_summary_for_display()
+                total_measurements = summary.get("total_measurements", 0)
+                latency_info = f", latency_measurements={total_measurements}"
+            except Exception:
+                latency_info = ", latency_measurements=error"
+        
         logger.info(
             f"Persisted session {self.session_id} – "
-            f"histories per agent: {[f'{a}: {len(h)}' for a, h in self.histories.items()]}, ctx_keys={list(self.context.keys())}"
+            f"histories per agent: {[f'{a}: {len(h)}' for a, h in self.histories.items()]}, "
+            f"ctx_keys={list(self.context.keys())}{latency_info}"
         )
 
     async def persist_to_redis_async(
@@ -143,6 +367,7 @@ class MemoManager:
                 await loop.run_in_executor(
                     None, redis_mgr.redis_client.expire, key, ttl_seconds
                 )
+            
             logger.info(
                 f"Persisted session {self.session_id} async – "
                 f"histories per agent: {[f'{a}: {len(h)}' for a, h in self.histories.items()]}, ctx_keys={list(self.context.keys())}"
@@ -223,14 +448,79 @@ class MemoManager:
         """
         return self.corememory.get("tool_outputs", {}).get(tool_name, default)
 
-    # --- LATENCY ------------------------------------------------------
-    def note_latency(self, stage: str, start_t: float, end_t: float) -> None:
-        """Record latency for a stage."""
-        self.latency.note(stage, start_t, end_t)
+    async def persist_latency_data(self, redis_mgr: Optional[AzureRedisManager] = None) -> bool:
+        """
+        Explicitly persist latency data to Redis.
+        
+        Returns:
+            bool: True if latency data was persisted successfully
+        """
+        if not self._latency_tracker:
+            logger.warning("No latency tracker available for persistence")
+            return False
+        
+        try:
+            await self.persist(redis_mgr)
+            logger.info(f"Latency data persisted for session {self.session_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to persist latency data: {e}")
+            return False
 
-    def latency_summary(self) -> Dict[str, Dict[str, float]]:
-        """Get latency summary."""
-        return self.latency.summary()
+    def get_persisted_latency_metrics(self) -> Dict[str, Any]:
+        """
+        Get latency metrics including persistence status.
+        
+        Returns:
+            Dict containing metrics and persistence information
+        """
+        metrics = self.get_latency_metrics()
+        
+        # Add persistence information
+        metrics["persistence"] = {
+            "redis_manager_available": self._redis_manager is not None,
+            "auto_persist_enabled": self.auto_refresh_interval is not None,
+            "last_refresh_time": self.last_refresh_time
+        }
+        
+        return metrics
+    
+    def track_tool(self, tool_name: str, duration_ms: float):
+        """Track tool execution time."""
+        if self._latency_tracker:
+            self._latency_tracker.track_tool(tool_name, duration_ms)
+
+    def get_latency_metrics(self) -> Dict[str, Any]:
+        """Get comprehensive latency metrics from minimal tracker."""
+        if not self._latency_tracker:
+            return {
+                "session_id": self.session_id,
+                "minimal_v2_enabled": False,
+                "message": "Minimal Latency Suite V2 not available"
+            }
+        
+        try:
+            summary = self._latency_tracker.get_summary()
+            return {
+                "session_id": summary["session_id"],
+                "minimal_v2_enabled": True,
+                "total_measurements": summary["total_measurements"],
+                "total_turns": summary.get("total_turns", 0),
+                "components": summary.get("components", {}),
+                "agents": summary.get("agents", {}),
+                "performance_metrics": {
+                    "overhead_ns": summary.get("overhead_ns", 0),
+                    "avg_overhead_ms": summary.get("overhead_ns", 0) / 1_000_000,
+                    "feature_enabled": True
+                }
+            }
+        except Exception as e:
+            logger.error(f"Failed to get minimal latency metrics: {e}")
+            return {
+                "session_id": self.session_id,
+                "minimal_v2_enabled": False,
+                "error": str(e)
+            }
 
     # --- HISTORY ------------------------------------------------------
     def append_to_history(self, agent: str, role: str, content: str) -> None:
@@ -558,3 +848,12 @@ class MemoManager:
                 f"Error in selective refresh for session {self.session_id}: {e}"
             )
         return updated
+
+    def __del__(self):
+        """Cleanup when object is garbage collected."""
+        # Cancel background tasks if they're still running
+        if hasattr(self, '_refresh_task') and self._refresh_task and not self._refresh_task.done():
+            self._refresh_task.cancel()
+        
+        if hasattr(self, '_enhanced_persist_task') and self._enhanced_persist_task and not self._enhanced_persist_task.done():
+            self._enhanced_persist_task.cancel()

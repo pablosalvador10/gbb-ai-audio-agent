@@ -588,6 +588,19 @@ class RouteTurnThread:
             try:
                 logger.info(f"🤖 Processing speech through orchestrator: {event.text}")
 
+                # Start enhanced tracking for this conversation turn
+                turn_id = None
+                orchestrator_context = None
+                
+                if self.memory_manager and hasattr(self.memory_manager, 'start_turn'):
+                    try:
+                        turn_id = self.memory_manager.start_turn(f"speech_processing_{event.text[:20]}")
+                        orchestrator_context = self.memory_manager.track_stage("orchestrator_processing")
+                        await orchestrator_context.__aenter__()
+                        logger.info(f"✅ Enhanced tracking started for turn: {turn_id}")
+                    except Exception as e:
+                        logger.warning(f"Enhanced tracking initialization failed: {e}")
+
                 # Check if memory manager is available
                 if not self.memory_manager:
                     logger.error(
@@ -616,8 +629,36 @@ class RouteTurnThread:
                         ws=self.websocket,
                         is_acs=True,
                     )
+                
+                # End enhanced tracking
+                if orchestrator_context:
+                    try:
+                        await orchestrator_context.__aexit__(None, None, None)
+                        logger.info("✅ Enhanced orchestrator tracking completed")
+                    except Exception as e:
+                        logger.warning(f"Enhanced tracking cleanup failed: {e}")
+                
+                if turn_id and self.memory_manager:
+                    try:
+                        self.memory_manager.end_turn(turn_id)
+                        logger.info(f"✅ Enhanced turn tracking completed: {turn_id}")
+                    except Exception as e:
+                        logger.warning(f"Enhanced turn cleanup failed: {e}")
 
             except Exception as e:
+                # Clean up enhanced tracking on error
+                if 'orchestrator_context' in locals() and orchestrator_context:
+                    try:
+                        await orchestrator_context.__aexit__(type(e), e, e.__traceback__)
+                    except Exception:
+                        pass
+                
+                if 'turn_id' in locals() and turn_id and self.memory_manager:
+                    try:
+                        self.memory_manager.end_turn(turn_id)
+                    except Exception:
+                        pass
+                
                 if hasattr(span, "set_status"):
                     span.set_status(Status(StatusCode.ERROR, str(e)))
                 logger.error(f"Error processing speech: {e}")

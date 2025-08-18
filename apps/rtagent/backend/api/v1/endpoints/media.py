@@ -347,17 +347,38 @@ async def _create_media_handler(
             logger.warning(
                 f"Memory manager from Redis returned None for {call_connection_id}, creating new one"
             )
-            memory_manager = MemoManager(session_id=call_connection_id)
+            memory_manager = MemoManager(
+                session_id=call_connection_id,
+                redis_mgr=redis_mgr,
+                enable_enhanced_tracking=True
+            )
+        else:
+            # Enhance existing memory manager from Redis
+            if not hasattr(memory_manager, '_enhanced_tracker') or memory_manager._enhanced_tracker is None:
+                memory_manager._redis_manager = redis_mgr
+                memory_manager._enable_enhanced_tracking = True
+                memory_manager._init_enhanced_tracker()
     except Exception as e:
         logger.error(
             f"Failed to load memory manager from Redis for {call_connection_id}: {e}"
         )
         logger.info(f"Creating new memory manager for {call_connection_id}")
-        memory_manager = MemoManager(session_id=call_connection_id)
+        memory_manager = MemoManager(
+            session_id=call_connection_id,
+            redis_mgr=redis_mgr,  # Enable enhanced tracking with auto-persistence
+            enable_enhanced_tracking=True
+        )
 
-    # Initialize latency tracking
-    websocket.state.lt = LatencyTool(memory_manager)
-    websocket.state.lt.start("greeting_ttfb")
+    # Initialize enhanced latency tracking
+    websocket.state.cm = memory_manager
+    websocket.state.lt = LatencyTool(memory_manager)  # Auto-detects enhanced tracker
+    
+    # Start a conversation turn for this WebSocket session
+    websocket.state.turn_id = memory_manager.start_turn(f"websocket_session_{call_connection_id}")
+    
+    # Start greeting TTFB tracking using enhanced context manager
+    websocket.state._greeting_context = memory_manager.track_stage("greeting_ttfb")
+    await websocket.state._greeting_context.__aenter__()
     websocket.state._greeting_ttfb_stopped = False
 
     # Set up call context in websocket state (per-connection)
@@ -555,6 +576,27 @@ async def _cleanup_websocket_resources(
             # Track WebSocket disconnection for session metrics
             if hasattr(websocket.app.state, "session_metrics"):
                 await websocket.app.state.session_metrics.increment_disconnected()
+
+            # Enhanced tracking cleanup
+            if hasattr(websocket.state, "cm") and websocket.state.cm:
+                try:
+                    # End the current turn
+                    if hasattr(websocket.state, "turn_id") and websocket.state.turn_id:
+                        websocket.state.cm.end_turn(websocket.state.turn_id)
+                        logger.info(f"Ended enhanced tracking turn: {websocket.state.turn_id}")
+                    
+                    # Clean up greeting context manager if still active
+                    if hasattr(websocket.state, "_greeting_context") and websocket.state._greeting_context:
+                        try:
+                            await websocket.state._greeting_context.__aexit__(None, None, None)
+                        except Exception as e:
+                            logger.debug(f"Greeting context cleanup: {e}")
+                    
+                    # Final cleanup of enhanced tracking
+                    await websocket.state.cm.cleanup_enhanced_tracking()
+                    logger.info(f"Enhanced tracking cleanup completed for session {session_id}")
+                except Exception as e:
+                    logger.error(f"Error during enhanced tracking cleanup: {e}")
 
             # Release STT recognizer back to pool
             if hasattr(websocket.state, "stt_client") and websocket.state.stt_client:

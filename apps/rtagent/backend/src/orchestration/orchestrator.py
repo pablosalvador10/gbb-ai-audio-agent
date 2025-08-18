@@ -14,7 +14,6 @@ Behavior-preserving refactor with two key goals:
 Public entry-point remains: :func:`route_turn`.
 """
 
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Iterable, Optional, Tuple, Protocol
 import json
@@ -355,16 +354,6 @@ async def _send_agent_greeting(
         )
 
 
-@asynccontextmanager
-async def track_latency(timer, label: str, redis_mgr):
-    """Context‑manager that starts/stops a latency timer and stores the metric."""
-    timer.start(label)
-    try:
-        yield
-    finally:
-        timer.stop(label, redis_mgr)
-
-
 # -------------------------------------------------------------
 # 1. Authentication agent
 # -------------------------------------------------------------
@@ -387,11 +376,12 @@ async def run_auth_agent(
 
     auth_agent = _get_agent_instance(ws, "AutoAuth")
 
-    async with track_latency(ws.state.lt, "auth_agent", ws.app.state.redis):
-        result: Dict[str, Any] | Any = await auth_agent.respond(  # type: ignore[union-attr]
-            cm, utterance, ws, is_acs=is_acs
-        )
-        logger.info("🚨 Auth result type: %s, value: %s", type(result).__name__, result)
+    # Minimal Latency Suite V2: Agent processing is already tracked by the orchestrator
+    # No need for additional legacy tracking here
+    result: Dict[str, Any] | Any = await auth_agent.respond(  # type: ignore[union-attr]
+        cm, utterance, ws, is_acs=is_acs
+    )
+    logger.info("🚨 Auth result type: %s, value: %s", type(result).__name__, result)
 
     if isinstance(result, dict) and result.get("handoff") == "human_agent":
         logger.info("🔀 Processing human_agent handoff…")
@@ -464,7 +454,8 @@ async def _run_specialist_base(
     # Context injection for agent awareness (preserve current content)
     cm.append_to_history(getattr(agent, "name", agent_key), "assistant", context_message)
 
-    async with track_latency(ws.state.lt, latency_label, ws.app.state.redis):
+    # Use minimal tracking through cm.track() interface
+    async with cm.track(latency_label):
         resp = await agent.respond(  # type: ignore[union-attr]
             cm,
             utterance,
@@ -637,8 +628,34 @@ async def route_turn(
         logger.error("❌ MemoManager (cm) is None - cannot process orchestration")
         raise ValueError("MemoManager (cm) parameter cannot be None")
 
-    # Extract correlation context
-    call_connection_id, session_id = _get_correlation_context(ws, cm)
+    # Minimal Latency Suite V2: Start orchestrator turn tracking
+    orchestrator_turn_id = None
+    route_turn_context = None
+    
+    try:
+        if hasattr(cm, 'track'):
+            # Track the overall route_turn stage using minimal tracker
+            route_turn_context = cm.track("route_turn")
+            if route_turn_context is not None:
+                await route_turn_context.__aenter__()
+                logger.info("🚀 Started minimal latency tracking for route_turn")
+            else:
+                logger.warning("cm.track returned None - latency tracking disabled")
+    except Exception as e:
+        logger.warning(f"Minimal tracking initialization failed in orchestrator: {e}")
+        route_turn_context = None
+
+    # Extract correlation context - defensive programming  
+    try:
+        correlation_result = _get_correlation_context(ws, cm)
+        if correlation_result is None or not isinstance(correlation_result, tuple) or len(correlation_result) != 2:
+            logger.error("❌ _get_correlation_context returned invalid result: %s", correlation_result)
+            call_connection_id, session_id = "unknown", "unknown"
+        else:
+            call_connection_id, session_id = correlation_result
+    except Exception as e:
+        logger.error("❌ Error extracting correlation context: %s", e)
+        call_connection_id, session_id = "unknown", "unknown"
 
     # Initialize session with configured entry agent if no active_agent is set
     if not _cm_get(cm, "authenticated", False) and _cm_get(cm, "active_agent") != _ENTRY_AGENT:
@@ -684,6 +701,20 @@ async def route_turn(
                 span.set_attribute("orchestrator.error", "unknown_agent")
                 return
 
+            # Minimal Latency Suite V2: Track agent execution
+            agent_context = None
+            try:
+                if route_turn_context:
+                    agent_context = cm.track(f"agent_{active.lower()}")
+                    if agent_context is not None:
+                        await agent_context.__aenter__()
+                        logger.info(f"🤖 Minimal tracking started for agent: {active}")
+                    else:
+                        logger.warning(f"cm.track returned None for agent {active} - agent tracking disabled")
+                        agent_context = None
+            except Exception as e:
+                logger.warning(f"Minimal agent tracking initialization failed: {e}")
+
             agent_attrs = create_service_dependency_attrs(
                 source_service="orchestrator",
                 target_service=active.lower() + "_agent",
@@ -698,15 +729,38 @@ async def route_turn(
             ):
                 await handler(cm, transcript, ws, is_acs=is_acs)
 
+                # Minimal Latency Suite V2: End agent execution
+                if agent_context:
+                    try:
+                        await agent_context.__aexit__(None, None, None)
+                        logger.info(f"✅ Minimal agent tracking completed for: {active}")
+                    except Exception as e:
+                        logger.warning(f"Minimal agent tracking cleanup failed: {e}")
+
                 # 3) After any agent runs, if escalation flag was set during the turn, terminate.
                 if await _maybe_terminate_if_escalated(cm, ws, is_acs=is_acs):
                     return
 
         except Exception:  # pylint: disable=broad-exception-caught
+            # Minimal Latency Suite V2: Cleanup on exception
+            if 'agent_context' in locals() and agent_context:
+                try:
+                    await agent_context.__aexit__(Exception, None, None)
+                except Exception:
+                    pass
+            
             logger.exception("💥 route_turn crash – session=%s", cm.session_id)
             span.set_attribute("orchestrator.error", "exception")
             raise
         finally:
+            # Minimal Latency Suite V2: Complete route_turn stage
+            if route_turn_context:
+                try:
+                    await route_turn_context.__aexit__(None, None, None)
+                    logger.info("✅ Minimal route_turn tracking completed")
+                except Exception as e:
+                    logger.warning(f"Minimal route_turn tracking cleanup failed: {e}")
+            
             # Ensure core‑memory is persisted even if a downstream component failed.
             await cm.persist_to_redis_async(redis_mgr)
 

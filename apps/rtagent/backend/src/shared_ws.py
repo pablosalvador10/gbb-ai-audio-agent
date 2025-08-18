@@ -65,7 +65,21 @@ async def send_tts_audio(
         logger.warning("Empty text provided for TTS synthesis")
         return
 
-    if latency_tool:
+    # Enhanced tracking using context managers
+    tts_context = None
+    synthesis_context = None
+    
+    # Get turn ID from WebSocket state for enhanced tracking
+    turn_id = getattr(ws.state, "turn_id", None)
+    
+    # Use enhanced tracking if available, fallback to legacy
+    if hasattr(ws.state, "cm") and ws.state.cm and hasattr(ws.state.cm, "track_stage"):
+        tts_context = ws.state.cm.track_stage("tts")
+        await tts_context.__aenter__()
+        synthesis_context = ws.state.cm.track_stage("tts:synthesis")
+        await synthesis_context.__aenter__()
+    elif latency_tool:
+        # Legacy tracking fallback
         latency_tool.start("tts")
         latency_tool.start("tts:synthesis")
 
@@ -104,7 +118,9 @@ async def send_tts_audio(
             rate=eff_rate,
         )
 
-        if latency_tool:
+        if synthesis_context:
+            await synthesis_context.__aexit__(None, None, None)
+        elif latency_tool:
             latency_tool.stop("tts:synthesis", ws.app.state.redis)
 
         frames = SpeechSynthesizer.split_pcm_to_base64_frames(pcm_bytes, sample_rate=48000)
@@ -137,7 +153,13 @@ async def send_tts_audio(
 
     except Exception as e:
         logger.error(f"TTS synthesis failed: {e}")
-        if latency_tool:
+        # Cleanup enhanced tracking contexts on error
+        if synthesis_context:
+            try:
+                await synthesis_context.__aexit__(type(e), e, e.__traceback__)
+            except Exception:
+                pass
+        elif latency_tool:
             # Ensure synthesis sub-span is closed if failure before stop
             try:
                 latency_tool.stop("tts:synthesis", ws.app.state.redis)
@@ -154,7 +176,13 @@ async def send_tts_audio(
         except Exception as send_error:
             logger.error(f"Failed to send error message to frontend: {send_error}")
     finally:
-        if latency_tool:
+        # Cleanup enhanced tracking contexts
+        if tts_context:
+            try:
+                await tts_context.__aexit__(None, None, None)
+            except Exception:
+                pass
+        elif latency_tool:
             try:
                 latency_tool.stop("tts", ws.app.state.redis)
             except Exception:
