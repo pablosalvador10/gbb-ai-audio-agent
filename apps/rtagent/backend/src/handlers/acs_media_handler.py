@@ -323,7 +323,6 @@ class ACSMediaHandler:
                     ws=self.incoming_websocket,
                     text=greeting_text,
                     blocking=False,
-                    latency_tool=self.latency_tool,
                     stream_mode=StreamMode.MEDIA,
                     voice_name=voice_name,
                     voice_style=voice_style,

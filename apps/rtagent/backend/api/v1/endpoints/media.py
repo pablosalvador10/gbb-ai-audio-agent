@@ -58,10 +58,10 @@ from apps.rtagent.backend.settings import ACS_STREAMING_MODE, ENABLE_AUTH_VALIDA
 from src.speech.speech_recognizer import StreamingSpeechRecognizerFromBytes
 from src.enums.stream_modes import StreamMode
 from src.stateful.state_managment import MemoManager
+from src.latency.tool_suite import LatencyTracker
 from apps.rtagent.backend.src.utils.tracing import log_with_context
 from apps.rtagent.backend.src.utils.auth import validate_acs_ws_auth, AuthError
 from utils.ml_logging import get_logger
-from apps.rtagent.backend.src.latency.latency_tool import LatencyTool
 from azure.communication.callautomation import PhoneNumberIdentifier
 
 # Import V1 components
@@ -350,14 +350,15 @@ async def _create_media_handler(
             memory_manager = MemoManager(
                 session_id=call_connection_id,
                 redis_mgr=redis_mgr,
-                enable_enhanced_tracking=True
+                enable_minimal_tracking=True
             )
         else:
-            # Enhance existing memory manager from Redis
-            if not hasattr(memory_manager, '_enhanced_tracker') or memory_manager._enhanced_tracker is None:
+            # Ensure existing memory manager from Redis has proper minimal tracking
+            if not hasattr(memory_manager, '_latency_tracker') or memory_manager._latency_tracker is None:
                 memory_manager._redis_manager = redis_mgr
-                memory_manager._enable_enhanced_tracking = True
-                memory_manager._init_enhanced_tracker()
+                # Initialize latency tracker for restored MemoManager
+                memory_manager._latency_tracker = LatencyTracker(memory_manager.session_id)
+                logger.info(f"Initialized latency tracker for restored MemoManager {memory_manager.session_id}")
     except Exception as e:
         logger.error(
             f"Failed to load memory manager from Redis for {call_connection_id}: {e}"
@@ -365,22 +366,16 @@ async def _create_media_handler(
         logger.info(f"Creating new memory manager for {call_connection_id}")
         memory_manager = MemoManager(
             session_id=call_connection_id,
-            redis_mgr=redis_mgr,  # Enable enhanced tracking with auto-persistence
-            enable_enhanced_tracking=True
+            redis_mgr=redis_mgr,  # Enable minimal tracking with auto-persistence
+            enable_minimal_tracking=True
         )
 
-    # Initialize enhanced latency tracking
+    # Initialize minimal latency tracking
     websocket.state.cm = memory_manager
-    websocket.state.lt = LatencyTool(memory_manager)  # Auto-detects enhanced tracker
+    # The MemoManager now includes built-in LatencyTracker (Suite v2)
+    # No need for separate LatencyTool - cm.track() provides the same functionality
+    websocket.state.lt = None  # Deprecated - use cm.track() directly
     
-    # Start a conversation turn for this WebSocket session
-    websocket.state.turn_id = memory_manager.start_turn(f"websocket_session_{call_connection_id}")
-    
-    # Start greeting TTFB tracking using enhanced context manager
-    websocket.state._greeting_context = memory_manager.track_stage("greeting_ttfb")
-    await websocket.state._greeting_context.__aenter__()
-    websocket.state._greeting_ttfb_stopped = False
-
     # Set up call context in websocket state (per-connection)
     target_phone_number = memory_manager.get_context("target_number")
     if target_phone_number:
@@ -577,23 +572,19 @@ async def _cleanup_websocket_resources(
             if hasattr(websocket.app.state, "session_metrics"):
                 await websocket.app.state.session_metrics.increment_disconnected()
 
-            # Enhanced tracking cleanup
+            # Memory manager cleanup
             if hasattr(websocket.state, "cm") and websocket.state.cm:
                 try:
-                    # End the current turn
-                    if hasattr(websocket.state, "turn_id") and websocket.state.turn_id:
-                        websocket.state.cm.end_turn(websocket.state.turn_id)
-                        logger.info(f"Ended enhanced tracking turn: {websocket.state.turn_id}")
+                    logger.info("WebSocket session ended - memory manager cleanup complete")
+                except Exception as e:
+                    logger.error(f"Error during enhanced tracking cleanup: {e}")
                     
-                    # Clean up greeting context manager if still active
-                    if hasattr(websocket.state, "_greeting_context") and websocket.state._greeting_context:
+                    # Persist any pending latency data
+                    if hasattr(websocket.state, "cm") and websocket.state.cm:
                         try:
-                            await websocket.state._greeting_context.__aexit__(None, None, None)
+                            await websocket.state.cm.persist(websocket.app.state.redis)
                         except Exception as e:
-                            logger.debug(f"Greeting context cleanup: {e}")
-                    
-                    # Final cleanup of enhanced tracking
-                    await websocket.state.cm.cleanup_enhanced_tracking()
+                            logger.debug(f"Latency data persistence: {e}")
                     logger.info(f"Enhanced tracking cleanup completed for session {session_id}")
                 except Exception as e:
                     logger.error(f"Error during enhanced tracking cleanup: {e}")

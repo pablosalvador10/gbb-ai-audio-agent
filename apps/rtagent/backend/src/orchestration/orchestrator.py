@@ -328,7 +328,6 @@ async def _send_agent_greeting(
                 ws=ws,
                 text=greeting,
                 blocking=False,
-                latency_tool=ws.state.lt,
                 voice_name=voice_name,
                 voice_style=voice_style,
                 rate=voice_rate,
@@ -347,7 +346,6 @@ async def _send_agent_greeting(
         await send_tts_audio(
             greeting,
             ws,
-            latency_tool=ws.state.lt,
             voice_name=voice_name,
             voice_style=voice_style,
             rate=voice_rate,

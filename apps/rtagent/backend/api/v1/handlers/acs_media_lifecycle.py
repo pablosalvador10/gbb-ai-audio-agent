@@ -588,19 +588,6 @@ class RouteTurnThread:
             try:
                 logger.info(f"🤖 Processing speech through orchestrator: {event.text}")
 
-                # Start enhanced tracking for this conversation turn
-                turn_id = None
-                orchestrator_context = None
-                
-                if self.memory_manager and hasattr(self.memory_manager, 'start_turn'):
-                    try:
-                        turn_id = self.memory_manager.start_turn(f"speech_processing_{event.text[:20]}")
-                        orchestrator_context = self.memory_manager.track_stage("orchestrator_processing")
-                        await orchestrator_context.__aenter__()
-                        logger.info(f"✅ Enhanced tracking started for turn: {turn_id}")
-                    except Exception as e:
-                        logger.warning(f"Enhanced tracking initialization failed: {e}")
-
                 # Check if memory manager is available
                 if not self.memory_manager:
                     logger.error(
@@ -608,57 +595,30 @@ class RouteTurnThread:
                     )
                     return
 
-                # Delegate to orchestrator using the new simplified signature
-                if self.orchestrator_func:
-                    await self.orchestrator_func(
-                        cm=self.memory_manager,
-                        transcript=event.text,
-                        ws=self.websocket,
-                        call_id=getattr(self.websocket, "_call_connection_id", None),
-                        is_acs=True,
-                    )
-                    logger.info(f"✅ Orchestrator completed successfully")
-                else:
-                    logger.warning(
-                        "⚠️ No orchestrator function provided, using fallback"
-                    )
-                    # Fallback to direct route_turn call
-                    await route_turn(
-                        cm=self.memory_manager,
-                        transcript=event.text,
-                        ws=self.websocket,
-                        is_acs=True,
-                    )
+                # Delegate to orchestrator using the new simplified signature with E2E tracking
+                async with self.memory_manager.track("turn_e2e"):
+                    if self.orchestrator_func:
+                        await self.orchestrator_func(
+                            cm=self.memory_manager,
+                            transcript=event.text,
+                            ws=self.websocket,
+                            call_id=getattr(self.websocket, "_call_connection_id", None),
+                            is_acs=True,
+                        )
+                        logger.info(f"✅ Orchestrator completed successfully")
+                    else:
+                        logger.warning(
+                            "⚠️ No orchestrator function provided, using fallback"
+                        )
+                        # Fallback to direct route_turn call
+                        await route_turn(
+                            cm=self.memory_manager,
+                            transcript=event.text,
+                            ws=self.websocket,
+                            is_acs=True,
+                        )
                 
-                # End enhanced tracking
-                if orchestrator_context:
-                    try:
-                        await orchestrator_context.__aexit__(None, None, None)
-                        logger.info("✅ Enhanced orchestrator tracking completed")
-                    except Exception as e:
-                        logger.warning(f"Enhanced tracking cleanup failed: {e}")
-                
-                if turn_id and self.memory_manager:
-                    try:
-                        self.memory_manager.end_turn(turn_id)
-                        logger.info(f"✅ Enhanced turn tracking completed: {turn_id}")
-                    except Exception as e:
-                        logger.warning(f"Enhanced turn cleanup failed: {e}")
-
             except Exception as e:
-                # Clean up enhanced tracking on error
-                if 'orchestrator_context' in locals() and orchestrator_context:
-                    try:
-                        await orchestrator_context.__aexit__(type(e), e, e.__traceback__)
-                    except Exception:
-                        pass
-                
-                if 'turn_id' in locals() and turn_id and self.memory_manager:
-                    try:
-                        self.memory_manager.end_turn(turn_id)
-                    except Exception:
-                        pass
-                
                 if hasattr(span, "set_status"):
                     span.set_status(Status(StatusCode.ERROR, str(e)))
                 logger.error(f"Error processing speech: {e}")
@@ -694,16 +654,12 @@ class RouteTurnThread:
                     f"🎵 Playing {playback_type} through Route Turn Thread: {event.text}"
                 )
 
-                # Get latency tool if available
-                latency_tool = getattr(self.websocket.state, "lt", None)
-
                 # Create cancellable task for TTS/playback
                 self.current_response_task = asyncio.create_task(
                     send_response_to_acs(
                         ws=self.websocket,
                         text=event.text,
                         blocking=False,
-                        latency_tool=latency_tool,
                         stream_mode=StreamMode.MEDIA,
                         voice_name=None,  # Use default voice
                         voice_style=None,  # Use default style

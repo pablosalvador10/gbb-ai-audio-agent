@@ -54,7 +54,6 @@ from opentelemetry.trace import SpanKind, Status, StatusCode
 # Core application imports
 from apps.rtagent.backend.settings import GREETING, ENABLE_AUTH_VALIDATION
 from apps.rtagent.backend.src.helpers import check_for_stopwords, receive_and_filter
-from apps.rtagent.backend.src.latency.latency_tool import LatencyTool
 from apps.rtagent.backend.src.orchestration.orchestrator import route_turn
 from apps.rtagent.backend.src.shared_ws import broadcast_message, send_tts_audio
 from src.speech.speech_recognizer import StreamingSpeechRecognizerFromBytes
@@ -511,7 +510,9 @@ async def _initialize_conversation_session(
     # Set up WebSocket state
     websocket.state.cm = memory_manager
     websocket.state.session_id = session_id
-    websocket.state.lt = LatencyTool(memory_manager)
+    # The MemoManager now includes built-in LatencyTracker (Suite v2)
+    # No need for separate LatencyTool - cm.track() provides the same functionality
+    websocket.state.lt = None  # Deprecated - use cm.track() directly
     websocket.state.is_synthesizing = False
     websocket.state.user_buffer = ""
 
@@ -523,12 +524,12 @@ async def _initialize_conversation_session(
     memory_manager.append_to_history(auth_agent.name, "assistant", GREETING)
 
     # Send TTS audio greeting
-    await send_tts_audio(GREETING, websocket, latency_tool=websocket.state.lt)
+    await send_tts_audio(GREETING, websocket)
 
     # Persist initial state to Redis
     await memory_manager.persist_to_redis_async(redis_mgr)
 
-    # Set up STT callbacks
+    # Set up STT callbacks with latency tracking
     def on_partial(txt: str, lang: str):
         logger.info(f"🗣️ User (partial) in {lang}: {txt}")
         if websocket.state.is_synthesizing:
@@ -548,6 +549,25 @@ async def _initialize_conversation_session(
 
     def on_final(txt: str, lang: str):
         logger.info(f"🧾 User (final) in {lang}: {txt}")
+        
+        # Track STT completion latency using MemoManager
+        if hasattr(websocket.state, "cm") and websocket.state.cm:
+            cm = websocket.state.cm
+            # Start a turn for STT tracking if not already started
+            turn_id = cm.start_turn(agent="stt")
+            logger.debug(f"STT final result captured | turn_id: {turn_id} | text: {txt[:50]}...")
+            
+            # Record STT completion (this could be enhanced with actual timing if available)
+            # For now, we'll track this as an event - actual STT timing would need to be 
+            # measured from when audio started streaming
+            try:
+                # If we had access to when STT started, we could measure actual latency
+                # For now, just record the STT completion event
+                if hasattr(cm, 'latency_tracker') and cm.latency_tracker:
+                    cm.latency_tracker.record("stt_final_result", 0.0)  # Placeholder
+            except Exception as e:
+                logger.warning(f"Failed to record STT latency: {e}")
+        
         websocket.state.user_buffer += txt.strip() + "\n"
 
     # Acquire per‑connection speech recognizer from pool
@@ -627,15 +647,33 @@ async def _process_conversation_messages(
                             await websocket.send_text(
                                 json.dumps({"type": "exit", "message": goodbye})
                             )
-                            await send_tts_audio(
-                                goodbye, websocket, latency_tool=websocket.state.lt
-                            )
+                            await send_tts_audio(goodbye, websocket)
                             break
 
-                        # Route through orchestrator
-                        await route_turn(
-                            memory_manager, prompt, websocket, is_acs=False
-                        )
+                        # Track E2E turn processing with the new latency system
+                        if hasattr(websocket.state, "cm") and websocket.state.cm:
+                            cm = websocket.state.cm
+                            # Start comprehensive E2E turn tracking
+                            turn_id = cm.start_turn(agent="e2e_turn")
+                            logger.info(f"🚀 Starting E2E turn tracking | turn_id: {turn_id} | prompt: {prompt[:50]}...")
+                            
+                            try:
+                                # Track the full orchestration pipeline
+                                async with cm.track("turn_e2e"):
+                                    # Route through orchestrator
+                                    await route_turn(
+                                        memory_manager, prompt, websocket, is_acs=False
+                                    )
+                                logger.info(f"✅ E2E turn completed | turn_id: {turn_id}")
+                            except Exception as e:
+                                logger.error(f"❌ E2E turn failed | turn_id: {turn_id} | error: {e}")
+                                raise
+                        else:
+                            # Fallback without tracking
+                            logger.warning("No MemoManager available for E2E turn tracking")
+                            await route_turn(
+                                memory_manager, prompt, websocket, is_acs=False
+                            )
 
                 # Handle disconnect
                 elif msg.get("type") == "websocket.disconnect":

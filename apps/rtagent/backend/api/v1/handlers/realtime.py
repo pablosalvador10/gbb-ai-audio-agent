@@ -20,7 +20,6 @@ from opentelemetry.trace import SpanKind, Status, StatusCode
 
 from apps.rtagent.backend.settings import GREETING
 from apps.rtagent.backend.src.helpers import check_for_stopwords, receive_and_filter
-from apps.rtagent.backend.src.latency.latency_tool import LatencyTool
 from apps.rtagent.backend.src.orchestration.orchestrator import route_turn
 from apps.rtagent.backend.src.shared_ws import broadcast_message, send_tts_audio
 from src.postcall.push import build_and_flush
@@ -161,7 +160,9 @@ class V1RealtimeHandler:
                 # Enhanced state initialization with V1 metadata
                 websocket.state.cm = cm
                 websocket.state.session_id = session_id
-                websocket.state.lt = LatencyTool(cm)
+                # The MemoManager now includes built-in LatencyTracker (Suite v2)
+                # No need for separate LatencyTool - cm.track() provides the same functionality
+                websocket.state.lt = None  # Deprecated - use cm.track() directly
                 websocket.state.is_synthesizing = False
                 websocket.state.user_buffer = ""
                 websocket.state.orchestrator_name = orchestrator_name
@@ -213,7 +214,7 @@ class V1RealtimeHandler:
                     session_id=session_id,
                 ) as dep_op:
                     await send_tts_audio(
-                        GREETING, websocket, latency_tool=websocket.state.lt
+                        GREETING, websocket
                     )
 
                 await cm.persist_to_redis_async(redis_mgr)
@@ -323,7 +324,6 @@ class V1RealtimeHandler:
                                     await send_tts_audio(
                                         goodbye,
                                         websocket,
-                                        latency_tool=websocket.state.lt,
                                     )
                                 break
 
