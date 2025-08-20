@@ -1,4 +1,5 @@
 import os
+import random
 import time
 from typing import Optional
 
@@ -209,6 +210,14 @@ class NoOpTraceContext:
 
     def add_event(self, name: str, attributes: dict = None) -> None:
         """No-op implementation of add_event."""
+        pass
+
+    def record_exception(self, exception: Exception) -> None:
+        """No-op implementation of record_exception."""
+        pass
+
+    def set_status(self, status) -> None:
+        """No-op implementation of set_status."""
         pass
 
 

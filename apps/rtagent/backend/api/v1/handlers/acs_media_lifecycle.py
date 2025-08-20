@@ -430,17 +430,17 @@ class SpeechSDKThread:
                 logger.error(f"❌ Test audio failed: {test_e}")
                 # Continue anyway - test failure doesn't mean recognizer is broken
 
-            # Add a manual barge-in test after 5 seconds to verify the mechanism
-            logger.info("🧪 Scheduling manual barge-in test in 5 seconds...")
-            asyncio.run_coroutine_threadsafe(
-                self._test_barge_in_after_delay(), asyncio.get_event_loop()
-            )
+            # # Add a manual barge-in test after 5 seconds to verify the mechanism
+            # logger.info("🧪 Scheduling manual barge-in test in 5 seconds...")
+            # asyncio.run_coroutine_threadsafe(
+            #     self._test_barge_in_after_delay(), asyncio.get_event_loop()
+            # )
 
-            # Also test partial callback triggering after 3 seconds
-            logger.info("🧪 Scheduling manual partial callback test in 3 seconds...")
-            asyncio.run_coroutine_threadsafe(
-                self._test_partial_callback_after_delay(), asyncio.get_event_loop()
-            )
+            # # Also test partial callback triggering after 3 seconds
+            # logger.info("🧪 Scheduling manual partial callback test in 3 seconds...")
+            # asyncio.run_coroutine_threadsafe(
+            #     self._test_partial_callback_after_delay(), asyncio.get_event_loop()
+            # )
 
         except Exception as e:
             logger.error(f"❌ Failed to start speech recognizer: {e}")
