@@ -62,8 +62,15 @@ class RealtimeStatusResponse(BaseModel):
 
     active_connections: Dict[str, int] = Field(
         ...,
-        description="Current active connection counts",
-        json_schema_extra={"example": {"dashboard_clients": 0, "conversation_sessions": 0}},
+        description="Current active connection counts and session statistics",
+        json_schema_extra={
+            "example": {
+                "dashboard_clients": 0, 
+                "conversation_sessions": 0,
+                "total_active_sessions": 0,
+                "total_disconnected": 0
+            }
+        },
     )
 
     protocols_supported: List[str] = Field(

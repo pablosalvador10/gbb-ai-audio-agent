@@ -37,7 +37,7 @@ from apps.rtagent.backend.src.services.acs.session_terminator import (
     terminate_session,
     TerminationReason,
 )
-from apps.rtagent.backend.src.shared_ws import (
+from apps.rtagent.backend.src.ws_helpers.shared_ws import (
     broadcast_message,
     send_tts_audio,
     send_response_to_acs,
@@ -320,8 +320,17 @@ async def _send_agent_greeting(
             agent_sender = "General Info"
         else:
             agent_sender = "Assistant"
-        clients = await ws.app.state.websocket_manager.get_clients_snapshot()
-        await broadcast_message(clients, greeting, agent_sender)
+        
+        # Use websocket manager for greetings
+        websocket_mgr = getattr(ws.app.state, "websocket_manager", None)
+        if websocket_mgr and cm.session_id:
+            sent_count = await websocket_mgr.broadcast_to_session(
+                cm.session_id, greeting
+            )
+            logger.debug(f"WebSocket greeting broadcast sent to {sent_count} clients in session {cm.session_id}")
+        else:
+            logger.warning("Production session manager not available for greeting broadcast")
+        
         try:
             # Use send_response_to_acs for proper ACS audio playback
             await send_response_to_acs(
@@ -369,10 +378,8 @@ async def track_latency(timer, label: str, redis_mgr, *, meta: Optional[Dict[str
     finally:
         sample = None
         try:
-            # New LatencyTool (v2) supports meta and returns a sample
             sample = timer.stop(label, redis_mgr, meta=meta or {})
         except TypeError:
-            # Backwards-compat with old LatencyTool signature
             timer.stop(label, redis_mgr)
         except Exception as e:
             logger.error("Latency stop error for stage '%s': %s", label, e)
@@ -725,12 +732,19 @@ async def route_turn(
     ) as span:
         redis_mgr = ws.app.state.redis
 
-        # 0) Broadcast raw user transcript to dashboards.
+        # 0) Broadcast raw user transcript to dashboards (SESSION-ISOLATED).
         try:
-            clients = await ws.app.state.websocket_manager.get_clients_snapshot()
-            await broadcast_message(clients, transcript, "User")
+            # Use websocket manager to prevent cross-user data leakage
+            websocket_mgr = getattr(ws.app.state, "websocket_manager", None)
+            if websocket_mgr and cm.session_id:
+                sent_count = await websocket_mgr.broadcast_to_session(
+                    cm.session_id, transcript
+                )
+                logger.debug(f"WebSocket broadcast sent to {sent_count} clients in session {cm.session_id}")
+            else:
+                logger.warning("WebSocket manager not available or no session_id")
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            logger.error("Broadcast failure: %s", exc)
+            logger.error("Production session broadcast failure: %s", exc)
 
         try:
             # 1) Unified escalation check (for *any* agent)

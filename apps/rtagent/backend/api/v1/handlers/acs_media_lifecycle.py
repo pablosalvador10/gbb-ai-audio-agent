@@ -34,7 +34,7 @@ from opentelemetry import trace
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
 from apps.rtagent.backend.settings import GREETING
-from apps.rtagent.backend.src.shared_ws import send_response_to_acs
+from apps.rtagent.backend.src.ws_helpers.shared_ws import send_response_to_acs
 from apps.rtagent.backend.src.orchestration.orchestrator import route_turn
 from src.enums.stream_modes import StreamMode
 from src.speech.speech_recognizer import StreamingSpeechRecognizerFromBytes
@@ -728,6 +728,9 @@ class ACSMediaHandler:
         self.memory_manager = memory_manager
         self.greeting_text = greeting_text
         self.call_id_short = call_connection_id[-8:] if call_connection_id else "unknown"
+        
+        # Store reference to session statistics manager for cleanup
+        self.session_statistics = getattr(websocket.app.state, 'session_statistics', None)
 
         # Initialize speech recognizer
         self.recognizer = recognizer or StreamingSpeechRecognizerFromBytes(
@@ -823,8 +826,15 @@ class ACSMediaHandler:
                 self._stopped = True
                 self.running = False
 
-                # Lock-free cleanup
+                # Lock-free cleanup from both registries
                 _active_handlers.pop(self.call_connection_id, None)
+                
+                # Remove from session statistics manager if available
+                if self.session_statistics:
+                    try:
+                        await self.session_statistics.remove_media_session(self.call_connection_id)
+                    except Exception as e:
+                        logger.error(f"[{self.call_id_short}] Error removing from session statistics: {e}")
 
                 # Stop components with individual error isolation
                 cleanup_errors = []

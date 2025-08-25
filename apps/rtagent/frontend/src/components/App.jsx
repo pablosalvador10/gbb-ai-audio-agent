@@ -1001,6 +1001,10 @@ const BackendIndicator = ({ url, onConfigureClick }) => {
 
   // Check health endpoint for session statistics
   const [healthData, setHealthData] = useState(null);
+  const [realtimeStatus, setRealtimeStatus] = useState(null);
+  const [mediaStatus, setMediaStatus] = useState(null);
+  const [sessionHealth, setSessionHealth] = useState(null);
+
   const checkHealth = async () => {
     try {
       const response = await fetch(`${url}/api/v1/health`);
@@ -1019,6 +1023,57 @@ const BackendIndicator = ({ url, onConfigureClick }) => {
     } catch (err) {
       console.error("Health check failed:", err);
       setHealthData(null);
+    }
+  };
+
+  // Check realtime status endpoint for detailed session statistics
+  const checkRealtimeStatus = async () => {
+    try {
+      const response = await fetch(`${url}/api/v1/realtime/status`);
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+      setRealtimeStatus(data);
+    } catch (err) {
+      console.error("Realtime status check failed:", err);
+      setRealtimeStatus(null);
+    }
+  };
+
+  // Check media status endpoint for detailed session statistics
+  const checkMediaStatus = async () => {
+    try {
+      const response = await fetch(`${url}/api/v1/media/status`);
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+      setMediaStatus(data);
+    } catch (err) {
+      console.error("Media status check failed:", err);
+      setMediaStatus(null);
+    }
+  };
+
+  // Check session health endpoint for unified session manager statistics
+  const checkSessionHealth = async () => {
+    try {
+      const response = await fetch(`${url}/api/v1/health/sessions`);
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+      setSessionHealth(data);
+    } catch (err) {
+      console.error("Session health check failed:", err);
+      setSessionHealth(null);
     }
   };
 
@@ -1097,12 +1152,18 @@ const BackendIndicator = ({ url, onConfigureClick }) => {
     checkReadiness();
     checkAgents();
     checkHealth();
+    checkRealtimeStatus();
+    checkMediaStatus();
+    checkSessionHealth();
 
     // Set up periodic checks every 30 seconds
     const interval = setInterval(() => {
       checkReadiness();
       checkAgents();
       checkHealth();
+      checkRealtimeStatus();
+      checkMediaStatus();
+      checkSessionHealth();
     }, 30000);
 
     return () => clearInterval(interval);
@@ -1446,39 +1507,162 @@ const BackendIndicator = ({ url, onConfigureClick }) => {
                 gap: "4px",
               }}>
                 📊 Session Statistics
+                {healthData.details?.session_statistics && (
+                  <span style={{
+                    fontSize: "7px",
+                    fontWeight: "500",
+                    color: "#059669",
+                    background: "#ecfdf5",
+                    padding: "1px 4px",
+                    borderRadius: "3px",
+                    border: "1px solid #bbf7d0",
+                  }}>
+                  </span>
+                )}
+                {!healthData.details?.session_statistics && healthData.session_metrics && (
+                  <span style={{
+                    fontSize: "7px",
+                    fontWeight: "500",
+                    color: "#dc2626",
+                    background: "#fef2f2",
+                    padding: "1px 4px",
+                    borderRadius: "3px",
+                    border: "1px solid #fecaca",
+                  }}>
+                    Legacy
+                  </span>
+                )}
               </div>
               
+              {/* Enhanced Session Statistics Grid */}
               <div style={{
                 display: "grid",
                 gridTemplateColumns: "1fr 1fr",
-                gap: "8px",
+                gap: "6px",
                 fontSize: "9px",
+                marginBottom: "8px",
               }}>
-                {/* Active Sessions */}
-                <div style={{
-                  background: "#f8fafc",
-                  border: "1px solid #e2e8f0",
-                  borderRadius: "6px",
-                  padding: "6px 8px",
-                  textAlign: "center",
-                }}>
+                {/* Active Sessions - Total */}
+                {healthData.details?.session_statistics?.active_sessions && (
                   <div style={{
-                    fontWeight: "600",
-                    color: "#10b981",
-                    fontSize: "12px",
+                    background: "linear-gradient(135deg, #ecfdf5 0%, #f0fdf4 100%)",
+                    border: "1px solid #bbf7d0",
+                    borderRadius: "6px",
+                    padding: "6px 8px",
+                    textAlign: "center",
                   }}>
-                    {healthData.active_sessions || 0}
+                    <div style={{
+                      fontWeight: "700",
+                      color: "#059669",
+                      fontSize: "14px",
+                    }}>
+                      {healthData.details.session_statistics.active_sessions.total || 0}
+                    </div>
+                    <div style={{
+                      color: "#065f46",
+                      fontSize: "8px",
+                      fontWeight: "500",
+                    }}>
+                      Total Active
+                    </div>
                   </div>
+                )}
+
+                {/* Total Disconnected */}
+                {healthData.details?.session_statistics?.total_disconnected !== undefined && (
                   <div style={{
-                    color: "#64748b",
-                    fontSize: "8px",
+                    background: "linear-gradient(135deg, #fef3f2 0%, #fef7f6 100%)",
+                    border: "1px solid #fecaca",
+                    borderRadius: "6px",
+                    padding: "6px 8px",
+                    textAlign: "center",
                   }}>
-                    Active Sessions
+                    <div style={{
+                      fontWeight: "700",
+                      color: "#dc2626",
+                      fontSize: "14px",
+                    }}>
+                      {healthData.details.session_statistics.total_disconnected}
+                    </div>
+                    <div style={{
+                      color: "#7f1d1d",
+                      fontSize: "8px",
+                      fontWeight: "500",
+                    }}>
+                      Total Disconnected
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Breakdown by Session Type */}
+              {healthData.details?.session_statistics?.active_sessions && (
+                <div style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 1fr",
+                  gap: "6px",
+                  fontSize: "9px",
+                  marginBottom: "8px",
+                }}>
+                  {/* Media Sessions */}
+                  <div style={{
+                    background: "linear-gradient(135deg, #eff6ff 0%, #f0f9ff 100%)",
+                    border: "1px solid #bfdbfe",
+                    borderRadius: "6px",
+                    padding: "6px 8px",
+                    textAlign: "center",
+                  }}>
+                    <div style={{
+                      fontWeight: "600",
+                      color: "#2563eb",
+                      fontSize: "12px",
+                    }}>
+                      {healthData.details.session_statistics.active_sessions.media || 0}
+                    </div>
+                    <div style={{
+                      color: "#1e40af",
+                      fontSize: "8px",
+                      fontWeight: "500",
+                    }}>
+                      Call Sessions
+                    </div>
+                  </div>
+
+                  {/* Realtime Sessions */}
+                  <div style={{
+                    background: "linear-gradient(135deg, #f3e8ff 0%, #f5f3ff 100%)",
+                    border: "1px solid #d8b4fe",
+                    borderRadius: "6px",
+                    padding: "6px 8px",
+                    textAlign: "center",
+                  }}>
+                    <div style={{
+                      fontWeight: "600",
+                      color: "#7c3aed",
+                      fontSize: "12px",
+                    }}>
+                      {healthData.details.session_statistics.active_sessions.realtime || 0}
+                    </div>
+                    <div style={{
+                      color: "#5b21b6",
+                      fontSize: "8px",
+                      fontWeight: "500",
+                    }}>
+                      UI Sessions
+                    </div>
                   </div>
                 </div>
+              )}
 
-                {/* Session Metrics */}
-                {healthData.session_metrics && (
+              {/* Legacy Session Metrics (if available) - Fallback for older backend */}
+              {!healthData.details?.session_statistics && healthData.session_metrics && (
+                <div style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 1fr",
+                  gap: "6px",
+                  fontSize: "9px",
+                  marginBottom: "8px",
+                }}>
                   <div style={{
                     background: "#f8fafc",
                     border: "1px solid #e2e8f0",
@@ -1497,48 +1681,259 @@ const BackendIndicator = ({ url, onConfigureClick }) => {
                       color: "#64748b",
                       fontSize: "8px",
                     }}>
-                      Total Connected
+                      Connected (Legacy)
                     </div>
                   </div>
-                )}
-                
-                {/* Disconnected Sessions */}
-                {healthData.session_metrics?.disconnected !== undefined && (
+
+                  {healthData.session_metrics.disconnected !== undefined && (
+                    <div style={{
+                      background: "#f8fafc",
+                      border: "1px solid #e2e8f0",
+                      borderRadius: "6px",
+                      padding: "6px 8px",
+                      textAlign: "center",
+                    }}>
+                      <div style={{
+                        fontWeight: "600",
+                        color: "#6b7280",
+                        fontSize: "12px",
+                      }}>
+                        {healthData.session_metrics.disconnected}
+                      </div>
+                      <div style={{
+                        color: "#64748b",
+                        fontSize: "8px",
+                      }}>
+                        Disconnected (Legacy)
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Session Details (when available) */}
+              {healthData.details?.session_statistics?.session_details && (
+                <div style={{
+                  background: "#f8fafc",
+                  border: "1px solid #e2e8f0",
+                  borderRadius: "6px",
+                  padding: "6px 8px",
+                  marginBottom: "8px",
+                }}>
                   <div style={{
-                    background: "#f8fafc",
-                    border: "1px solid #e2e8f0",
-                    borderRadius: "6px",
-                    padding: "6px 8px",
-                    textAlign: "center",
-                    gridColumn: healthData.session_metrics ? "1 / -1" : "auto",
+                    fontSize: "8px",
+                    fontWeight: "600",
+                    color: "#374151",
+                    marginBottom: "4px",
                   }}>
-                    <div style={{
-                      fontWeight: "600",
-                      color: "#6b7280",
-                      fontSize: "12px",
-                    }}>
-                      {healthData.session_metrics.disconnected}
-                    </div>
-                    <div style={{
-                      color: "#64748b",
-                      fontSize: "8px",
-                    }}>
-                      Disconnected
-                    </div>
+                    Active Session IDs:
                   </div>
-                )}
-              </div>
+                  <div style={{
+                    fontSize: "7px",
+                    color: "#64748b",
+                    lineHeight: "1.2",
+                  }}>
+                    {healthData.details.session_statistics.session_details.media_sessions?.length > 0 && (
+                      <div>
+                        <span style={{color: "#2563eb", fontWeight: "500"}}>Media:</span> {
+                          healthData.details.session_statistics.session_details.media_sessions
+                            .map(id => id.substring(0, 8))
+                            .join(", ") || "none"
+                        }
+                      </div>
+                    )}
+                    {healthData.details.session_statistics.session_details.realtime_sessions?.length > 0 && (
+                      <div>
+                        <span style={{color: "#7c3aed", fontWeight: "500"}}>Realtime:</span> {
+                          healthData.details.session_statistics.session_details.realtime_sessions
+                            .map(id => id.substring(0, 8))
+                            .join(", ") || "none"
+                        }
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
               
               {/* Last updated */}
               <div style={{
                 fontSize: "8px",
                 color: "#94a3b8",
-                marginTop: "6px",
                 textAlign: "center",
                 fontStyle: "italic",
               }}>
                 Updated: {new Date(healthData.timestamp * 1000).toLocaleTimeString()}
               </div>
+            </div>
+          )}
+
+          {/* Unified Session Manager Section */}
+          {shouldBeExpanded && sessionHealth && (
+            <div style={{
+              marginTop: "8px",
+              paddingTop: "8px",
+              borderTop: "1px solid #f1f5f9",
+            }}>
+              <div style={{
+                fontSize: "10px",
+                fontWeight: "600",
+                color: "#374151",
+                marginBottom: "6px",
+                display: "flex",
+                alignItems: "center",
+                gap: "4px",
+              }}>
+                🔄 Unified Session Manager
+                <span style={{
+                  fontSize: "7px",
+                  fontWeight: "500",
+                  color: sessionHealth.status === "healthy" ? "#059669" : sessionHealth.status === "warning" ? "#d97706" : "#dc2626",
+                  background: sessionHealth.status === "healthy" ? "#ecfdf5" : sessionHealth.status === "warning" ? "#fef3e2" : "#fef2f2",
+                  padding: "1px 4px",
+                  borderRadius: "3px",
+                  border: sessionHealth.status === "healthy" ? "1px solid #bbf7d0" : sessionHealth.status === "warning" ? "1px solid #fed7aa" : "1px solid #fecaca",
+                }}>
+                  {sessionHealth.status}
+                </span>
+              </div>
+
+              {sessionHealth.metrics && (
+                <div style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 1fr",
+                  gap: "6px",
+                  fontSize: "9px",
+                  marginBottom: "8px",
+                }}>
+                  {/* Active Connections */}
+                  <div style={{
+                    background: "linear-gradient(135deg, #ecfdf5 0%, #f0fdf4 100%)",
+                    border: "1px solid #bbf7d0",
+                    borderRadius: "6px",
+                    padding: "6px 8px",
+                    textAlign: "center",
+                  }}>
+                    <div style={{
+                      fontWeight: "700",
+                      color: "#059669",
+                      fontSize: "14px",
+                    }}>
+                      {sessionHealth.metrics.local_connections || 0}
+                    </div>
+                    <div style={{
+                      color: "#065f46",
+                      fontSize: "8px",
+                      fontWeight: "500",
+                    }}>
+                      Active Connections
+                    </div>
+                  </div>
+
+                  {/* Active Sessions */}
+                  <div style={{
+                    background: "linear-gradient(135deg, #eff6ff 0%, #f0f9ff 100%)",
+                    border: "1px solid #bfdbfe",
+                    borderRadius: "6px",
+                    padding: "6px 8px",
+                    textAlign: "center",
+                  }}>
+                    <div style={{
+                      fontWeight: "700",
+                      color: "#2563eb",
+                      fontSize: "14px",
+                    }}>
+                      {sessionHealth.metrics.local_sessions || 0}
+                    </div>
+                    <div style={{
+                      color: "#1e40af",
+                      fontSize: "8px",
+                      fontWeight: "500",
+                    }}>
+                      Active Sessions
+                    </div>
+                  </div>
+
+                  {/* Total Disconnected */}
+                  {sessionHealth.metrics.total_connections_removed !== undefined && (
+                    <div style={{
+                      background: "#f8fafc",
+                      border: "1px solid #e2e8f0",
+                      borderRadius: "6px",
+                      padding: "6px 8px",
+                      textAlign: "center",
+                    }}>
+                      <div style={{
+                        fontWeight: "600",
+                        color: "#6b7280",
+                        fontSize: "12px",
+                      }}>
+                        {sessionHealth.metrics.total_connections_removed}
+                      </div>
+                      <div style={{
+                        color: "#4b5563",
+                        fontSize: "8px",
+                      }}>
+                        Total Disconnected
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Rejection Rate */}
+                  {sessionHealth.metrics.rejection_rate !== undefined && (
+                    <div style={{
+                      background: sessionHealth.metrics.rejection_rate > 0.1 ? "#fef2f2" : "#f0fdf4",
+                      border: sessionHealth.metrics.rejection_rate > 0.1 ? "1px solid #fecaca" : "1px solid #bbf7d0",
+                      borderRadius: "6px",
+                      padding: "6px 8px",
+                      textAlign: "center",
+                    }}>
+                      <div style={{
+                        fontWeight: "600",
+                        color: sessionHealth.metrics.rejection_rate > 0.1 ? "#dc2626" : "#059669",
+                        fontSize: "12px",
+                      }}>
+                        {(sessionHealth.metrics.rejection_rate * 100).toFixed(1)}%
+                      </div>
+                      <div style={{
+                        color: sessionHealth.metrics.rejection_rate > 0.1 ? "#991b1b" : "#065f46",
+                        fontSize: "8px",
+                      }}>
+                        Rejection Rate
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Storage Mode */}
+              {sessionHealth.metrics?.storage_mode && (
+                <div style={{
+                  fontSize: "9px",
+                  color: "#64748b",
+                  textAlign: "center",
+                  marginBottom: "4px",
+                  padding: "3px 6px",
+                  background: "#f8fafc",
+                  borderRadius: "4px",
+                  border: "1px solid #e2e8f0",
+                }}>
+                  Storage: {sessionHealth.metrics.storage_mode} 
+                  {sessionHealth.metrics.redis_connected ? " ✅" : " ⚠️"}
+                </div>
+              )}
+
+              {/* Session Manager Message */}
+              {sessionHealth.message && (
+                <div style={{
+                  fontSize: "8px",
+                  color: "#4b5563",
+                  textAlign: "center",
+                  fontStyle: "italic",
+                  marginTop: "4px",
+                }}>
+                  {sessionHealth.message}
+                </div>
+              )}
             </div>
           )}
 
@@ -2315,6 +2710,15 @@ function RealTimeVoiceApp() {
       
       // --- Handle relay/broadcast messages with {sender, message} ---
       if (payload.sender && payload.message) {
+        // Check if this is a duplicate of a recent message to prevent relay/broadcast duplication
+        const isDuplicate = messages.slice(-3).some(msg => 
+          msg.text === payload.message && msg.speaker === payload.sender
+        );
+        if (isDuplicate) {
+          console.log("🚫 Duplicate message detected, skipping:", payload.message.substring(0, 50));
+          return; // Skip duplicate messages
+        }
+        
         // Route all relay messages through the same logic
         payload.speaker = payload.sender;
         payload.content = payload.message;
@@ -2327,7 +2731,17 @@ function RealTimeVoiceApp() {
       /* ---------- USER BRANCH ---------- */
       if (msgType === "user" || speaker === "User") {
         setActiveSpeaker("User");
-        // Always append user message immediately, do not dedupe
+        
+        // Check for duplicate user messages (same text in recent messages)
+        const isDuplicate = messages.slice(-2).some(msg => 
+          msg.text === txt && msg.speaker === "User"
+        );
+        if (isDuplicate) {
+          console.log("🚫 Duplicate user message detected, skipping:", txt.substring(0, 50));
+          return; // Skip duplicate user messages
+        }
+        
+        // Always append user message immediately
         setMessages(prev => [...prev, { speaker: "User", text: txt }]);
 
         appendLog(`User: ${txt}`);

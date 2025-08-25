@@ -209,18 +209,28 @@ async def health_check(request: Request) -> HealthResponse:
     Additionally (best-effort) augments response with:
     - active_sessions: current active realtime conversation sessions
     - session_metrics: websocket connection metrics snapshot
+    - session_statistics: comprehensive session statistics from new manager
     (Failure to gather these must NOT cause liveness failure.)
     """
     active_sessions: int | None = None
     session_metrics: dict[str, Any] | None = None
+    session_statistics: dict[str, Any] | None = None
 
     try:
-        # Active sessions
+        # Active sessions (legacy method for backward compatibility)
         session_manager = getattr(request.app.state, "session_manager", None)
         if session_manager and hasattr(session_manager, "get_session_count"):
             active_sessions = await session_manager.get_session_count()  # type: ignore[func-returns-value]
     except Exception:
         active_sessions = None
+
+    try:
+        # New comprehensive session statistics
+        session_stats_manager = getattr(request.app.state, "session_statistics", None)
+        if session_stats_manager:
+            session_statistics = await session_stats_manager.get_statistics()
+    except Exception:
+        session_statistics = None
 
     try:
         # Session metrics snapshot (WebSocket connection metrics)
@@ -259,7 +269,11 @@ async def health_check(request: Request) -> HealthResponse:
         status="healthy",
         timestamp=time.time(),
         message="Real-Time Audio Agent API v1 is running",
-        details={"api_version": "v1", "service": "rtagent-backend"},
+        details={
+            "api_version": "v1", 
+            "service": "rtagent-backend",
+            "session_statistics": session_statistics
+        },
         active_sessions=active_sessions,
         session_metrics=session_metrics,
     )

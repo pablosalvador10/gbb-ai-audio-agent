@@ -56,7 +56,7 @@ from apps.rtagent.backend.settings import GREETING, ENABLE_AUTH_VALIDATION
 from apps.rtagent.backend.src.helpers import check_for_stopwords, receive_and_filter
 from src.tools.latency_tool import LatencyTool
 from apps.rtagent.backend.src.orchestration.orchestrator import route_turn
-from apps.rtagent.backend.src.shared_ws import broadcast_message, send_tts_audio
+from apps.rtagent.backend.src.ws_helpers.shared_ws import broadcast_message, send_tts_audio
 from src.speech.speech_recognizer import StreamingSpeechRecognizerFromBytes
 from src.postcall.push import build_and_flush
 from src.stateful.state_managment import MemoManager
@@ -137,7 +137,28 @@ async def get_realtime_status(request: Request):
     :return: RealtimeStatusResponse containing service status, endpoints, and session information.
     :raises: None (endpoint designed to always return current service status).
     """
-    session_count = await request.app.state.session_manager.get_session_count()
+    # Get statistics from the unified session manager instead of session_statistics
+    websocket_mgr = getattr(request.app.state, "websocket_manager", None)
+    
+    if websocket_mgr:
+        # Get metrics from unified session manager
+        session_metrics = await websocket_mgr.get_health_metrics()
+        
+        # Count dashboard connections
+        dashboard_count = 0
+        conversation_count = 0
+        total_connections = session_metrics.get("local_connections", 0)
+        
+        # Try to get more detailed counts if available
+        dashboard_count = len(_active_dashboard_clients)
+        conversation_count = max(0, total_connections - dashboard_count)
+        
+    else:
+        # Fallback to session statistics if unified manager not available
+        session_stats = await request.app.state.session_statistics.get_statistics()
+        dashboard_count = len(_active_dashboard_clients)
+        conversation_count = session_stats["active_sessions"]["realtime"]
+        total_connections = session_stats["active_sessions"]["total"]
 
     return RealtimeStatusResponse(
         status="available",
@@ -156,8 +177,10 @@ async def get_realtime_status(request: Request):
             "legacy_compatibility": True,
         },
         active_connections={
-            "dashboard_clients": len(_active_dashboard_clients),
-            "conversation_sessions": session_count,
+            "dashboard_clients": dashboard_count,
+            "conversation_sessions": conversation_count,
+            "total_active_sessions": total_connections,
+            "total_disconnected": session_metrics.get("total_connections_removed", 0) if websocket_mgr else session_stats.get("total_disconnected", 0),
         },
         protocols_supported=["WebSocket"],
         version="v1",
@@ -165,10 +188,11 @@ async def get_realtime_status(request: Request):
 
 
 @router.websocket("/dashboard/relay")
-async def dashboard_relay_endpoint(websocket: WebSocket):
-    """Enhanced dashboard relay WebSocket endpoint with advanced monitoring.
+async def dashboard_relay_endpoint(websocket: WebSocket, session_id: Optional[str] = None):
+    """Enhanced dashboard relay WebSocket endpoint with session-specific monitoring.
 
     :param websocket: WebSocket connection from dashboard client
+    :param session_id: Optional session ID to monitor specific session (secure mode)
     :return: None
     :raises WebSocketDisconnect: When client disconnects from WebSocket
     :raises Exception: For any other errors during connection processing
@@ -186,29 +210,49 @@ async def dashboard_relay_endpoint(websocket: WebSocket):
                 "api.version": "v1",
                 "realtime.client_id": client_id,
                 "realtime.endpoint": "dashboard_relay",
+                "realtime.session_id": session_id,
                 "network.protocol.name": "websocket",
             },
         ) as connect_span:
             # Validate dependencies
             await _validate_realtime_dependencies(websocket)
 
-            # Add client to global registry
+            # Determine monitoring mode and session assignment
+            if session_id:
+                # Session-specific monitoring (secure mode)
+                dashboard_session_id = session_id
+                monitoring_mode = "session-specific"
+            else:
+                # Global monitoring (legacy mode - will show all messages)
+                dashboard_session_id = "global-dashboard"
+                monitoring_mode = "global"
+                logger.warning(
+                    f"Dashboard client {client_id} using GLOBAL monitoring mode. "
+                    "This may cause cross-user data leakage in production."
+                )
+
+            # Session is already registered with the WebSocket manager above
+
+            # Legacy global registry for backward compatibility
             if websocket not in _active_dashboard_clients:
                 _active_dashboard_clients.add(websocket)
-                logger.info(
-                    f"Dashboard client {client_id} connected. Total clients: {len(_active_dashboard_clients)}"
-                )
                 connect_span.set_attribute(
                     "dashboard.clients.total", len(_active_dashboard_clients)
                 )
 
-            # Store client info in app state using thread-safe manager
-            await websocket.app.state.websocket_manager.add_client(websocket)
+            # Store client info using production WebSocket manager
+            await websocket.app.state.websocket_manager.add_connection(
+                websocket=websocket,
+                session_id=dashboard_session_id,
+                connection_type="dashboard",
+                metadata={
+                    "client_id": client_id,
+                    "monitoring_mode": monitoring_mode,
+                    "target_session_id": session_id if session_id else None
+                }
+            )
 
-            # Track WebSocket connection for session metrics
-            if hasattr(websocket.app.state, "session_metrics"):
-                await websocket.app.state.session_metrics.increment_connected()
-
+            connect_span.set_attribute("dashboard.monitoring_mode", monitoring_mode)
             connect_span.set_status(Status(StatusCode.OK))
             log_with_context(
                 logger,
@@ -216,6 +260,8 @@ async def dashboard_relay_endpoint(websocket: WebSocket):
                 "Dashboard client connected successfully",
                 operation="dashboard_connect",
                 client_id=client_id,
+                session_id=dashboard_session_id,
+                monitoring_mode=monitoring_mode,
                 total_clients=len(_active_dashboard_clients),
                 api_version="v1",
             )
@@ -252,13 +298,21 @@ async def browser_conversation_endpoint(
         # Accept connection and initialize session
         await websocket.accept()
 
-        # Generate collision-resistant session ID
+        # Generate collision-resistant session ID with production normalization
         if websocket.headers.get("x-ms-call-connection-id"):
             # For ACS calls, use the full call-connection-id (already unique)
-            session_id = websocket.headers.get("x-ms-call-connection-id")
+            raw_session_id = websocket.headers.get("x-ms-call-connection-id")
         else:
             # For realtime calls, use full UUID4 to prevent collisions
-            session_id = str(uuid.uuid4())
+            raw_session_id = str(uuid.uuid4())
+        
+        # Normalize session ID using session manager
+        session_mgr = getattr(websocket.app.state, "session_manager", None)
+        if session_mgr:
+            session_id = session_mgr.normalize_session_id(raw_session_id)
+        else:
+            session_id = raw_session_id
+            logger.warning("Session manager not available, using raw session ID")
 
         with tracer.start_as_current_span(
             "api.v1.realtime.conversation_connect",
@@ -285,19 +339,26 @@ async def browser_conversation_endpoint(
                 websocket, session_id, orchestrator
             )
 
-            # Register session thread-safely
-            await websocket.app.state.session_manager.add_session(
+            # Register with production WebSocket manager for unified tracking
+            await websocket.app.state.websocket_manager.add_connection(
+                websocket=websocket,
+                session_id=session_id,
+                connection_type="realtime_conversation",
+                metadata={
+                    "raw_session_id": raw_session_id,
+                    "memory_manager_id": getattr(memory_manager, "session_id", None),
+                    "orchestrator": getattr(orchestrator, "name", "unknown") if orchestrator else "default"
+                }
+            )
+
+            # Register session with session statistics for monitoring
+            await websocket.app.state.session_statistics.add_realtime_session(
                 session_id, memory_manager, websocket
             )
 
-            # Track WebSocket connection for session metrics
-            if hasattr(websocket.app.state, "session_metrics"):
-                await websocket.app.state.session_metrics.increment_connected()
-
-            session_count = (
-                await websocket.app.state.session_manager.get_session_count()
-            )
-            connect_span.set_attribute("conversation.sessions.total", session_count)
+            session_stats = await websocket.app.state.session_statistics.get_statistics()
+            connect_span.set_attribute("conversation.sessions.active", session_stats["active_sessions"]["realtime"])
+            connect_span.set_attribute("conversation.sessions.total_active", session_stats["active_sessions"]["total"])
             connect_span.set_status(Status(StatusCode.OK))
 
             log_with_context(
@@ -306,7 +367,8 @@ async def browser_conversation_endpoint(
                 "Conversation session initialized successfully",
                 operation="conversation_connect",
                 session_id=session_id,
-                total_sessions=session_count,
+                total_sessions=session_stats["active_sessions"]["total"],
+                realtime_sessions=session_stats["active_sessions"]["realtime"],
                 api_version="v1",
             )
 
@@ -722,6 +784,8 @@ async def _cleanup_dashboard_connection(
         "api.v1.realtime.cleanup_dashboard", attributes={"client_id": client_id}
     ) as span:
         try:
+            # Session cleanup is automatically handled by websocket_manager.remove_connection() above
+
             # Remove from global registry
             if websocket in _active_dashboard_clients:
                 _active_dashboard_clients.remove(websocket)
@@ -729,12 +793,8 @@ async def _cleanup_dashboard_connection(
                     f"Dashboard client {client_id} removed. Remaining clients: {len(_active_dashboard_clients)}"
                 )
 
-            # Remove from app state using thread-safe manager
-            await websocket.app.state.websocket_manager.remove_client(websocket)
-
-            # Track WebSocket disconnection for session metrics
-            if hasattr(websocket.app.state, "session_metrics"):
-                await websocket.app.state.session_metrics.increment_disconnected()
+            # Remove from production WebSocket manager
+            await websocket.app.state.websocket_manager.remove_connection(websocket)
 
             # Close WebSocket if still connected
             if (
@@ -803,20 +863,21 @@ async def _cleanup_conversation_session(
 
             # Remove from session registry thread-safely
             if session_id:
-                removed = await websocket.app.state.session_manager.remove_session(
+                # Remove from session statistics
+                removed_stats = await websocket.app.state.session_statistics.remove_realtime_session(
                     session_id
                 )
-                if removed:
-                    remaining_count = (
-                        await websocket.app.state.session_manager.get_session_count()
-                    )
+                
+                if removed_stats:
+                    session_stats = await websocket.app.state.session_statistics.get_statistics()
                     logger.info(
-                        f"Conversation session {session_id} removed. Active sessions: {remaining_count}"
+                        f"Conversation session {session_id} removed. "
+                        f"Active realtime sessions: {session_stats['active_sessions']['realtime']}, "
+                        f"Total disconnected: {session_stats['total_disconnected']}"
                     )
 
-            # Track WebSocket disconnection for session metrics
-            if hasattr(websocket.app.state, "session_metrics"):
-                await websocket.app.state.session_metrics.increment_disconnected()
+            # Remove from production WebSocket manager
+            await websocket.app.state.websocket_manager.remove_connection(websocket)
 
             # Close WebSocket if still connected
             if (

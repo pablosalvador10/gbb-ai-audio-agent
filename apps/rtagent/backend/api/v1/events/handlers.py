@@ -21,7 +21,7 @@ from azure.communication.callautomation import PhoneNumberIdentifier
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind
 
-from apps.rtagent.backend.src.shared_ws import broadcast_message
+from apps.rtagent.backend.src.ws_helpers.shared_ws import broadcast_message
 from utils.ml_logging import get_logger
 from .types import CallEventContext, ACSEventTypes
 
@@ -257,19 +257,28 @@ class CallEventHandlers:
             # Broadcast connection status to WebSocket clients
             try:
                 if context.clients:
-                    await broadcast_message(
-                        context.clients,
-                        json.dumps(
-                            {
-                                "type": "call_connected",
-                                "call_connection_id": context.call_connection_id,
-                                "timestamp": context.get_event_data()
-                                .get("callConnectionProperties", {})
-                                .get("connectedTime"),
-                                "validation_flow": "aws_connect_simulation",
-                            }
-                        ),
+                    # For ACS events, use call_connection_id as session_id for secure broadcasting
+                    websocket_mgr = getattr(context.app_state, "websocket_manager", None)
+                    call_connected_message = json.dumps(
+                        {
+                            "type": "call_connected",
+                            "call_connection_id": context.call_connection_id,
+                            "timestamp": context.get_event_data()
+                            .get("callConnectionProperties", {})
+                            .get("connectedTime"),
+                            "validation_flow": "aws_connect_simulation",
+                        }
                     )
+                    
+                    if websocket_mgr:
+                        sent_count = await websocket_mgr.broadcast_to_session(
+                            context.call_connection_id, call_connected_message
+                        )
+                        logger.debug(f"WebSocket call connected broadcast sent to {sent_count} clients in session {context.call_connection_id}")
+                    else:
+                        logger.warning("WebSocket manager not available, falling back to global broadcast")
+                        await broadcast_message(context.clients, call_connected_message)
+                        
             except Exception as e:
                 logger.error(f"Failed to broadcast call connected: {e}")
                 

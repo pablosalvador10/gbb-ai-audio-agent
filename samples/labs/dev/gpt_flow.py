@@ -32,7 +32,7 @@ from apps.rtagent.backend.src.agents.tool_store.tools_helper import (
 )
 from apps.rtagent.backend.src.helpers import add_space
 from apps.rtagent.backend.src.services.openai_services import client as az_openai_client
-from apps.rtagent.backend.src.shared_ws import (
+from apps.rtagent.backend.src.ws_helpers.shared_ws import (
     broadcast_message,
     push_final,
     send_response_to_acs,

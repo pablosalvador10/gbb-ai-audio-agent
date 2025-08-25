@@ -38,8 +38,6 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from opentelemetry import trace
 from src.pools.async_pool import AsyncPool
-from src.pools.websocket_manager import ThreadSafeWebSocketManager
-from src.pools.session_metrics import ThreadSafeSessionMetrics
 
 from apps.rtagent.backend.settings import (
     AGENT_AUTH_CONFIG,
@@ -85,6 +83,8 @@ from apps.rtagent.backend.src.services.openai_services import (
     client as azure_openai_client,
 )
 from apps.rtagent.backend.api.v1.events.registration import register_default_handlers
+from apps.rtagent.backend.src.sessions.session_manager import SessionManager
+
 
 
 # --------------------------------------------------------------------------- #
@@ -119,17 +119,48 @@ async def lifespan(app: FastAPI):
         )
 
         # ------------------------ Process-wide shared state -------------------
-        # Dashboard sockets & greeted set
-        # Thread-safe WebSocket client management
-        from src.pools.session_manager import ThreadSafeSessionManager
+        # Enterprise session management with Redis backing
+        span.set_attribute("startup.stage", "session_management")
 
-        app.state.websocket_manager = ThreadSafeWebSocketManager()
-        app.state.session_manager = ThreadSafeSessionManager()
+        # Import unified session manager
+        from apps.rtagent.backend.src.sessions import (
+            initialize_session_manager
+        )
 
+        # Initialize Redis-backed session manager for horizontal scaling
+        redis_manager = getattr(app.state, 'redis', None)
+        if redis_manager and redis_manager.is_connected:
+            # Redis-backed session manager for horizontal scaling
+            app.state.session_manager = await initialize_session_manager(
+                redis_manager=redis_manager,
+                session_ttl_seconds=int(os.getenv("SESSION_TTL", "3600")),
+                cleanup_interval_seconds=int(os.getenv("SESSION_CLEANUP_INTERVAL", "300")),
+                max_connections_per_session=int(os.getenv("MAX_CONNECTIONS_PER_SESSION", "10")),
+                max_total_connections=int(os.getenv("MAX_WEBSOCKET_CONNECTIONS", "50000")),
+                graceful_degradation=True  # Allow connections beyond limit with degraded performance
+            )
+            await app.state.session_manager.start_background_cleanup()
+            
+            # Unified manager handles both sessions and websockets
+            app.state.websocket_manager = app.state.session_manager
+            
+            logger.info("Initialized Redis-backed session manager for horizontal scaling")
+        else:
+            logger.warning("Redis not available, falling back to memory-only session management")
+            # Fallback to memory-only session manager (single instance only)
+            app.state.session_manager = await initialize_session_manager(
+                redis_manager=None,  # No Redis - memory only
+                session_ttl_seconds=int(os.getenv("SESSION_TTL", "3600")),
+                cleanup_interval_seconds=int(os.getenv("SESSION_CLEANUP_INTERVAL", "300")),
+                max_connections_per_session=int(os.getenv("MAX_CONNECTIONS_PER_SESSION", "10")),
+                max_total_connections=int(os.getenv("MAX_WEBSOCKET_CONNECTIONS", "10000")),  # Reduced for memory-only
+                graceful_degradation=True
+            )
+            await app.state.session_manager.start_background_cleanup()
+            app.state.websocket_manager = app.state.session_manager
+
+        # Production tracking
         app.state.greeted_call_ids = set()  # avoid double greetings
-
-        # Thread-safe session metrics for visibility
-        app.state.session_metrics = ThreadSafeSessionMetrics()
 
         # ------------------------ Speech Pools (TTS / STT) -------------------
         span.set_attribute("startup.stage", "speech_pools")
@@ -192,6 +223,14 @@ async def lifespan(app: FastAPI):
             collection_name=AZURE_COSMOS_COLLECTION_NAME,
         )
 
+        span.set_attribute("startup.stage", "session_statistics")
+        from apps.rtagent.backend.src.sessions.session_statistics import SessionStatisticsManager
+        app.state.session_statistics = SessionStatisticsManager(cosmos_manager=app.state.cosmos)
+        await app.state.session_statistics.initialize()
+
+        # Start background cleanup tasks (already done above)
+        # Background cleanup was started when managers were initialized
+
         span.set_attribute("startup.stage", "openai_clients")
         app.state.azureopenai_client = azure_openai_client
         app.state.promptsclient = PromptManager()
@@ -230,6 +269,16 @@ async def lifespan(app: FastAPI):
         span.set_attributes(
             {"service.name": "rtagent-api", "shutdown.stage": "cleanup"}
         )
+        
+        # Stop production managers background cleanup
+        try:
+            # Stop session management
+            if hasattr(app.state, 'session_manager'):
+                await app.state.session_manager.stop_background_cleanup()
+            logger.info("✅ Production session and WebSocket cleanup stopped")
+        except Exception as e:
+            logger.error(f"❌ Error stopping background cleanup: {e}")
+        
         span.set_attribute("shutdown.success", True)
 
 

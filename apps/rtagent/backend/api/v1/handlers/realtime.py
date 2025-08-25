@@ -22,7 +22,7 @@ from apps.rtagent.backend.settings import GREETING
 from apps.rtagent.backend.src.helpers import check_for_stopwords, receive_and_filter
 from src.tools.latency_tool import LatencyTool
 from apps.rtagent.backend.src.orchestration.orchestrator import route_turn
-from apps.rtagent.backend.src.shared_ws import broadcast_message, send_tts_audio
+from apps.rtagent.backend.src.ws_helpers.shared_ws import broadcast_message, send_tts_audio
 from src.postcall.push import build_and_flush
 from src.stateful.state_managment import MemoManager
 from utils.ml_logging import get_logger
@@ -206,10 +206,14 @@ class V1RealtimeHandler:
                 cm.append_to_history(auth_agent.name, "assistant", GREETING)
 
                 # Broadcast greeting to dashboard with Auth Agent label
-                clients = (
-                    await websocket.app.state.websocket_manager.get_clients_snapshot()
-                )
-                await broadcast_message(clients, GREETING, "Auth Agent")
+                websocket_mgr = getattr(websocket.app.state, "websocket_manager", None)
+                if websocket_mgr:
+                    sent_count = await websocket_mgr.broadcast_to_session(
+                        session_id, GREETING
+                    )
+                    logger.debug(f"WebSocket auth greeting broadcast sent to {sent_count} clients in session {session_id}")
+                else:
+                    logger.warning("Production session manager not available for auth greeting broadcast")
 
                 # Send greeting audio
                 with trace_acs_dependency(

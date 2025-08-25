@@ -10,6 +10,61 @@ from pydantic import BaseModel, Field, ConfigDict
 from datetime import datetime
 
 
+class MediaStatusResponse(BaseModel):
+    """Response schema for media service status endpoint."""
+
+    status: str = Field(
+        ...,
+        description="Current media service status",
+        json_schema_extra={"example": "available", "enum": ["available", "degraded", "unavailable"]},
+    )
+
+    streaming_mode: str = Field(
+        ...,
+        description="Current streaming mode configuration",
+        json_schema_extra={"example": "MEDIA"},
+    )
+
+    websocket_endpoint: str = Field(
+        ...,
+        description="WebSocket endpoint for media streaming",
+        json_schema_extra={"example": "/api/v1/media/stream"},
+    )
+
+    protocols_supported: List[str] = Field(
+        default=["WebSocket"],
+        description="Supported communication protocols",
+        json_schema_extra={"example": ["WebSocket"]},
+    )
+
+    features: Dict[str, bool] = Field(
+        ...,
+        description="Supported features and capabilities",
+        json_schema_extra={
+            "example": {
+                "real_time_audio": True,
+                "transcription": True,
+                "orchestrator_support": True,
+                "session_management": True,
+            }
+        },
+    )
+
+    active_connections: Dict[str, int] = Field(
+        ...,
+        description="Current active media session counts and statistics",
+        json_schema_extra={
+            "example": {
+                "media_sessions": 0,
+                "total_active_sessions": 0,
+                "total_disconnected": 0
+            }
+        },
+    )
+
+    version: str = Field(default="v1", description="API version", json_schema_extra={"example": "v1"})
+
+
 class MediaSessionRequest(BaseModel):
     """Request schema for starting a media session."""
 

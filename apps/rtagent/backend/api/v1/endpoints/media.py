@@ -37,6 +37,7 @@ from fastapi import (
     status,
     WebSocket,
     WebSocketDisconnect,
+    Request,
 )
 from fastapi.websockets import WebSocketState
 import asyncio
@@ -52,6 +53,7 @@ from apps.rtagent.backend.api.v1.schemas.media import (
     MediaSessionRequest,
     MediaSessionResponse,
     AudioStreamStatus,
+    MediaStatusResponse,
 )
 
 from apps.rtagent.backend.settings import ACS_STREAMING_MODE, ENABLE_AUTH_VALIDATION
@@ -77,27 +79,50 @@ _active_handlers = {}
 router = APIRouter()
 
 
-@router.get("/status", response_model=dict, summary="Get Media Streaming Status")
-async def get_media_status():
+@router.get("/status", response_model=MediaStatusResponse, summary="Get Media Streaming Status")
+async def get_media_status(request: Request):
     """
     Get the current status of media streaming configuration.
 
-    :return: Current media streaming configuration and status
-    :rtype: dict
+    :param request: FastAPI request object providing access to application state
+    :return: Current media streaming configuration and status with session statistics
+    :rtype: MediaStatusResponse
     """
-    return {
-        "status": "available",
-        "streaming_mode": str(ACS_STREAMING_MODE),
-        "websocket_endpoint": "/api/v1/media/stream",
-        "protocols_supported": ["WebSocket"],
-        "features": {
+    # Get statistics from the unified session manager instead of session_statistics
+    websocket_mgr = getattr(request.app.state, "websocket_manager", None)
+    
+    if websocket_mgr:
+        # Get metrics from unified session manager
+        session_metrics = await websocket_mgr.get_health_metrics()
+        
+        # Count media connections (ACS media connections)
+        total_connections = session_metrics.get("local_connections", 0)
+        media_sessions = total_connections  # Most connections should be media in this context
+        
+    else:
+        # Fallback to session statistics if unified manager not available
+        session_stats = await request.app.state.session_statistics.get_statistics()
+        media_sessions = session_stats["active_sessions"]["media"]
+        total_connections = session_stats["active_sessions"]["total"]
+    
+    return MediaStatusResponse(
+        status="available",
+        streaming_mode=str(ACS_STREAMING_MODE),
+        websocket_endpoint="/api/v1/media/stream",
+        protocols_supported=["WebSocket"],
+        features={
             "real_time_audio": True,
             "transcription": True,
             "orchestrator_support": True,
             "session_management": True,
         },
-        "version": "v1",
-    }
+        active_connections={
+            "media_sessions": media_sessions,
+            "total_active_sessions": total_connections,
+            "total_disconnected": session_metrics.get("total_connections_removed", 0) if websocket_mgr else session_stats.get("total_disconnected", 0),
+        },
+        version="v1",
+    )
 
 
 @router.post(
@@ -180,7 +205,14 @@ async def acs_media_stream(
             call_connection_id = headers_dict.get("x-ms-call-connection-id")
             logger.debug(f"🔍 Headers: {headers_dict}")
 
-        session_id = call_connection_id
+        # Use session manager for consistent session ID handling
+        session_mgr = getattr(websocket.app.state, "session_manager", None)
+        if session_mgr:
+            session_id = session_mgr.normalize_session_id(call_connection_id)
+        else:
+            session_id = call_connection_id  # Fallback
+            logger.warning("Session manager not available, using raw call_connection_id")
+        
         # Start tracing with valid call connection ID
         with tracer.start_as_current_span(
             "api.v1.media.websocket_accept",
@@ -229,9 +261,16 @@ async def acs_media_stream(
             await handler.start()
             init_span.set_attribute("handler.initialized", True)
 
-            # Track WebSocket connection for session metrics
-            if hasattr(websocket.app.state, "session_metrics"):
-                await websocket.app.state.session_metrics.increment_connected()
+            # Register with production WebSocket manager for unified tracking
+            await websocket.app.state.websocket_manager.add_connection(
+                websocket=websocket,
+                session_id=session_id,
+                connection_type="acs_media",
+                metadata={
+                    "call_connection_id": call_connection_id,
+                    "handler_type": type(handler).__name__ if handler else "unknown"
+                }
+            )
 
         # Process media messages with clean loop
         await _process_media_stream(websocket, handler, call_connection_id)
@@ -345,8 +384,9 @@ async def _create_media_handler(
                 await existing_handler.stop()
             except Exception as e:
                 logger.error(f"Error stopping existing handler: {e}")
-        # Remove from registry regardless
+        # Remove from both registries
         del _active_handlers[call_connection_id]
+        await websocket.app.state.session_statistics.remove_media_session(call_connection_id)
 
     redis_mgr = websocket.app.state.redis
 
@@ -412,8 +452,9 @@ async def _create_media_handler(
             memory_manager=memory_manager,
             session_id=session_id,
         )
-        # Register the handler in the global registry
+        # Register the handler in both the global registry and session statistics manager
         _active_handlers[call_connection_id] = handler
+        await websocket.app.state.session_statistics.add_media_session(call_connection_id, handler)
         logger.info("Created V1 ACS media handler for MEDIA mode")
         return handler
 
@@ -611,6 +652,8 @@ async def _cleanup_websocket_resources(
         },
     ) as span:
         try:
+            # WebSocket connection is automatically removed by websocket_manager.remove_connection() above
+
             # Close WebSocket if still connected
             if (
                 websocket.client_state == WebSocketState.CONNECTED
@@ -619,9 +662,8 @@ async def _cleanup_websocket_resources(
                 await websocket.close()
                 logger.info("WebSocket connection closed")
 
-            # Track WebSocket disconnection for session metrics
-            if hasattr(websocket.app.state, "session_metrics"):
-                await websocket.app.state.session_metrics.increment_disconnected()
+            # Remove from production WebSocket manager
+            await websocket.app.state.websocket_manager.remove_connection(websocket)
 
             # Release STT recognizer back to pool
             if hasattr(websocket.state, "stt_client") and websocket.state.stt_client:

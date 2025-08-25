@@ -37,7 +37,7 @@ from apps.rtagent.backend.src.agents.tool_store.tools_helper import (
 )
 from apps.rtagent.backend.src.helpers import add_space
 from apps.rtagent.backend.src.services.openai_services import client as az_openai_client
-from apps.rtagent.backend.src.shared_ws import (
+from apps.rtagent.backend.src.ws_helpers.shared_ws import (
     broadcast_message,
     push_final,
     send_response_to_acs,
@@ -524,8 +524,19 @@ async def _broadcast_dashboard(
             include_autoauth,
             message[:50],
         )
-        clients = await ws.app.state.websocket_manager.get_clients_snapshot()
-        await broadcast_message(clients, message, sender)
+        
+        # Use websocket manager for GPT flow messages
+        websocket_mgr = getattr(ws.app.state, "websocket_manager", None)
+        if websocket_mgr and cm.session_id:
+            # Use dashboard-specific broadcast to reach dashboard connections
+            # instead of trying to broadcast to ACS media connections
+            sent_count = await websocket_mgr.broadcast_to_dashboard_connections(
+                cm.session_id, message
+            )
+            logger.debug(f"Dashboard broadcast sent to {sent_count} dashboard clients for call {cm.session_id}")
+        else:
+            logger.warning("Session manager not available for dashboard broadcast")
+            
     except Exception as exc:  # noqa: BLE001
         logger.error("Failed to broadcast dashboard message: %s", exc)
 

@@ -32,7 +32,7 @@ from apps.rtagent.backend.settings import (
     GREETING,
     GREETING_VOICE_TTS,
 )
-from apps.rtagent.backend.src.shared_ws import broadcast_message
+from apps.rtagent.backend.src.ws_helpers.shared_ws import broadcast_message
 
 from src.enums.stream_modes import StreamMode
 from src.stateful.state_managment import MemoManager
